@@ -1,4 +1,4 @@
-from app.core.agent_base import BaseAgent
+from app.agents.agent_base import BaseAgent
 
 
 class ChatAgent(BaseAgent):

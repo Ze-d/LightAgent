@@ -3,7 +3,7 @@ from openai import OpenAI
 
 from app.configs.logger import logger
 from app.obj.types import ChatMessage, FunctionCallOutput
-from app.core.agent_base import BaseAgent
+from app.agents.agent_base import BaseAgent
 from app.core.tool_registry import ToolRegistry
 
 
@@ -24,7 +24,7 @@ class AgentRunner:
             if (tool_registry and agent.supports_tools())
             else []
         )
-
+        # 每一步都让 Agent 生成输出，直到没有工具调用或达到最大步数
         for step in range(1, self.max_steps + 1):
             logger.info(f"runner step={step} agent={agent.name}")
 
@@ -57,9 +57,26 @@ class AgentRunner:
                     result = "工具参数解析失败。"
                 else:
                     try:
-                        result = tool_registry.call(tool_name, **tool_args)
+                        result : str = tool_registry.call(tool_name, **tool_args)
                     except Exception as e:
                         result = f"工具执行失败：{e}"
+                        agent.emit_tool_event({
+                            "agent_name": agent.name,
+                            "step": step,
+                            "tool_name": tool_name,
+                            "arguments": tool_args,
+                            "status": "error",
+                            "error": str(e),
+                        })
+                    else:
+                        agent.emit_tool_event({
+                            "agent_name": agent.name,
+                            "step": step,
+                            "tool_name": tool_name,
+                            "arguments": tool_args,
+                            "result": result,
+                            "status": "success",
+                        })
 
                 next_input.append({
                     "type": "function_call_output",

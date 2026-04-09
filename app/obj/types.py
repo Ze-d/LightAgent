@@ -19,3 +19,12 @@ class ToolSpec(TypedDict):
     description: str
     parameters: dict[str, Any]
     handler: Callable[..., str]
+
+class ToolCallEvent(TypedDict, total=False):
+    agent_name: str
+    step: int
+    tool_name: str
+    arguments: dict[str, Any]
+    result: str
+    status: Literal["start", "success", "error"]
+    error: str

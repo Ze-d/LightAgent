@@ -26,7 +26,7 @@ class ToolRegistry:
             for spec in self._tools.values()
         ]
     # 调用工具
-    def call(self, name: str, **kwargs) -> str:
+    def call(self, name: str, **kwargs: Any) -> str:
         handler = self.get_handler(name)
         if handler is None:
             raise ValueError(f"Unknown tool: {name}")
