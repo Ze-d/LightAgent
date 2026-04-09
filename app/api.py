@@ -12,7 +12,7 @@ from app.configs.logger import logger
 from app.obj.schemas import ChatRequest, ChatResponse
 from app.obj.types import ChatMessage
 from app.core.runner import AgentRunner
-from app.core.session_manager import SessionManager
+from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.listener.sse_listener import make_tool_event_listener
 from app.core.event_channel import EventChannel
 from app.tools.register import build_default_registry
@@ -21,7 +21,7 @@ app = FastAPI(title="Minimal Agent API")
 
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT )
 runner = AgentRunner(client=client, max_steps=MAX_STEPS)
-session_manager = SessionManager()
+session_manager : BaseSessionManager = InMemorySessionManager()
 tool_registry = build_default_registry()
 def log_tool_event(event: ToolCallEvent) -> None:
     logger.info(f"[tool-event] {event}")
@@ -47,7 +47,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
         session_id = session_manager.create(history)
-        logger.info(f"Created new session: {session_id}")
+        logger.debug(f"Created new session: {session_id}")
     else:
         session_id = req.session_id
         history: list[ChatMessage] | None = session_manager.load(session_id)
@@ -68,6 +68,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         "role": "user",
         "content": req.message,
     })
+    session_manager.save(session_id, history)  # 保存用户消息后的状态，以便工具调用时能拿到最新历史
 
     # 3. 调用 Agent
     try:
@@ -128,20 +129,26 @@ async def chat_stream(req: ChatRequest):
     })
 
     # 3. 创建 ToolAwareAgent
+    loop = asyncio.get_running_loop()
     agent = ToolAwareAgent(
         name="chat-agent",
         model=LLM_MODEL_ID,
         system_prompt=SYSTEM_PROMPT,
-        tool_call_listener=make_tool_event_listener(channel),
+        tool_call_listener=make_tool_event_listener(channel, loop),
     )
 
     # 4. 在后台跑 runner，过程中事件会持续进入 channel
     async def run_agent():
         try:
-            answer = runner.run(
-                agent=agent,
-                history=history,
-                tool_registry=tool_registry,
+            # Use run_in_executor to run sync runner.run() in thread pool
+            # This prevents blocking the event loop, allowing SSE events to stream
+            answer = await loop.run_in_executor(
+                None,  # use default thread pool
+                lambda: runner.run(
+                    agent=agent,
+                    history=history,
+                    tool_registry=tool_registry,
+                )
             )
             history.append({
                 "role": "assistant",

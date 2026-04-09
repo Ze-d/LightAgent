@@ -4,7 +4,7 @@ from app.obj.types import ToolCallEvent
 from app.core.event_channel import EventChannel
 
 
-def make_tool_event_listener(channel: EventChannel):
+def make_tool_event_listener(channel: EventChannel, loop: asyncio.AbstractEventLoop):
     def listener(event: ToolCallEvent) -> None:
         mapped_event: dict[str, Any] = {
             "event": {
@@ -14,7 +14,8 @@ def make_tool_event_listener(channel: EventChannel):
             }[event["status"]],
             "data": event,
         }
-        asyncio.create_task(channel.publish(mapped_event))
+        # Schedule coroutine from worker thread using the captured event loop
+        asyncio.run_coroutine_threadsafe(channel.publish(mapped_event), loop)
     return listener
 # 这版是“教学型最小方案”。
 # 如果你后面把 Runner 放在线程池里，asyncio.create_task() 这套就要换成更稳的线程安全桥接方式。
