@@ -72,7 +72,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     # 3. 调用 Agent
     try:
-        answer = runner.run(agent, history, tool_registry)
+        run_result = runner.run(agent, history, tool_registry)
+        answer = run_result["answer"]
     except Exception as e:
         logger.exception("Agent run failed")
         raise HTTPException(
@@ -142,7 +143,7 @@ async def chat_stream(req: ChatRequest):
         try:
             # Use run_in_executor to run sync runner.run() in thread pool
             # This prevents blocking the event loop, allowing SSE events to stream
-            answer = await loop.run_in_executor(
+            run_result = await loop.run_in_executor(
                 None,  # use default thread pool
                 lambda: runner.run(
                     agent=agent,
@@ -150,6 +151,7 @@ async def chat_stream(req: ChatRequest):
                     tool_registry=tool_registry,
                 )
             )
+            answer = run_result["answer"]
             history.append({
                 "role": "assistant",
                 "content": answer,

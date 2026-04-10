@@ -28,3 +28,9 @@ class ToolCallEvent(TypedDict, total=False):
     result: str
     status: Literal["start", "success", "error"]
     error: str
+class AgentRunResult(TypedDict):
+    answer: str
+    success: bool
+    steps: int
+    tool_events: list[ToolCallEvent]
+    error: str | None

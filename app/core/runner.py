@@ -2,7 +2,7 @@ import json
 from openai import OpenAI
 
 from app.configs.logger import logger
-from app.obj.types import ChatMessage, FunctionCallOutput
+from app.obj.types import AgentRunResult, ChatMessage, FunctionCallOutput, ToolCallEvent
 from app.agents.agent_base import BaseAgent
 from app.core.tool_registry import ToolRegistry
 
@@ -17,8 +17,9 @@ class AgentRunner:
         agent: BaseAgent,
         history: list[ChatMessage],
         tool_registry: ToolRegistry | None = None,
-    ) -> str:
+    ) -> AgentRunResult:
         current_input = history
+        collected_events: list[ToolCallEvent] = []
         tools = (
             tool_registry.get_openai_tools()
             if (tool_registry and agent.supports_tools())
@@ -40,10 +41,24 @@ class AgentRunner:
             ]
 
             if not function_calls:
-                return response.output_text or "模型没有返回文本结果。"
+                return {
+                    "answer": response.output_text or "模型没有返回文本结果。",
+                    "success": True,
+                    "steps": step,
+                    "tool_events": collected_events,
+                    "error": None,
+                }
+
 
             if tool_registry is None:
-                return "当前 Agent 未配置工具注册中心。"
+                 return {
+                    "answer": "当前 Agent 未配置工具注册中心。",
+                    "success": False,
+                    "steps": step,
+                    "tool_events": collected_events,
+                    "error": "missing_tool_registry",
+                }
+
 
             next_input: list[FunctionCallOutput] = []
 
@@ -86,4 +101,10 @@ class AgentRunner:
 
             current_input = next_input
 
-        return "抱歉，任务执行步数过多，已停止。"
+        return {
+            "answer": "抱歉，任务执行步数过多，已停止。",
+            "success": False,
+            "steps": self.max_steps,
+            "tool_events": collected_events,
+            "error": "max_steps_exceeded",
+        }
