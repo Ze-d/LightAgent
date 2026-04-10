@@ -6,27 +6,34 @@ from openai import OpenAI
 
 from app.agents.tool_aware_agent import ToolAwareAgent
 from app.configs.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_ID, MAX_STEPS,LLM_TIMEOUT
-from app.listener.log_listener import log_listener
+from app.core import hooks
+from app.core.hooks import CompositeRunnerHooks
+from app.core.middleware import CompositeRunnerMiddleware
+from app.hooks.logging_hooks import LoggingHooks
+from app.hooks.sse_hooks import SSEHooks
+from app.middleware.history_trim_middleware import HistoryTrimMiddleware
+from app.middleware.tool_permission_middleware import ToolPermissionMiddleware
 from app.prompts.prompt import SYSTEM_PROMPT
 from app.configs.logger import logger
 from app.obj.schemas import ChatRequest, ChatResponse
 from app.obj.types import ChatMessage
 from app.core.runner import AgentRunner
 from app.core.session_manager import BaseSessionManager, InMemorySessionManager
-from app.listener.sse_listener import make_tool_event_listener
 from app.core.event_channel import EventChannel
 from app.tools.register import build_default_registry
 
+hooks = CompositeRunnerHooks([LoggingHooks()])
+middleware = CompositeRunnerMiddleware([
+    HistoryTrimMiddleware(max_messages=20),
+    ToolPermissionMiddleware(blocked_tools={"dangerous_tool"}),
+])
+    
 app = FastAPI(title="Minimal Agent API")
-
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT )
-runner = AgentRunner(client=client, max_steps=MAX_STEPS)
+runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=hooks, middleware=middleware)
 session_manager : BaseSessionManager = InMemorySessionManager()
 tool_registry = build_default_registry()
-def log_tool_event(event: ToolCallEvent) -> None:
-    logger.info(f"[tool-event] {event}")
 
-from app.configs.logger import logger
 
 
 
@@ -38,9 +45,8 @@ async def root():
 
 
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
-async def chat(req: ChatRequest) -> ChatResponse:
+def chat(req: ChatRequest) -> ChatResponse:
     logger.info("Received /chat request")
-
     # 1. 处理会话初始化或读取
     if req.session_id is None:
         history: list[ChatMessage] = [
@@ -61,7 +67,6 @@ async def chat(req: ChatRequest) -> ChatResponse:
     name="chat-agent",
     model=LLM_MODEL_ID,
     system_prompt=SYSTEM_PROMPT,
-    tool_call_listener=log_listener(),
 )
     # 2. 追加用户消息
     history.append({
@@ -100,6 +105,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
 @app.post("/chat/stream", response_class=EventSourceResponse)
 async def chat_stream(req: ChatRequest):
     channel = EventChannel()
+    # Create SSEHooks with the event loop for cross-thread event publishing
+    loop = asyncio.get_event_loop()
+    sse_hooks = SSEHooks(channel=channel, loop=loop)
+    run_hooks = CompositeRunnerHooks([LoggingHooks(), sse_hooks])
 
     # 1. 初始化会话
     if req.session_id is None:
@@ -135,9 +144,7 @@ async def chat_stream(req: ChatRequest):
         name="chat-agent",
         model=LLM_MODEL_ID,
         system_prompt=SYSTEM_PROMPT,
-        tool_call_listener=make_tool_event_listener(channel, loop),
     )
-
     # 4. 在后台跑 runner，过程中事件会持续进入 channel
     async def run_agent():
         try:
@@ -149,6 +156,7 @@ async def chat_stream(req: ChatRequest):
                     agent=agent,
                     history=history,
                     tool_registry=tool_registry,
+                    hooks=run_hooks,
                 )
             )
             answer = run_result["answer"]

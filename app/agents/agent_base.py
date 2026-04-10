@@ -15,6 +15,5 @@ class BaseAgent(ABC):
     def supports_tools(self) -> bool:
         """标记当前 Agent 是否支持工具调用"""
         pass
-    def emit_tool_event(self, event: ToolCallEvent) -> None:
-        """默认什么都不做，子类可覆盖"""
-        return
+    def on_tool_event(self, event: ToolCallEvent) -> None:
+        pass
