@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.sse import EventSourceResponse
@@ -6,7 +7,6 @@ from openai import OpenAI
 
 from app.agents.tool_aware_agent import ToolAwareAgent
 from app.configs.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_ID, MAX_STEPS,LLM_TIMEOUT
-from app.core import hooks
 from app.core.hooks import CompositeRunnerHooks
 from app.core.middleware import CompositeRunnerMiddleware
 from app.hooks.logging_hooks import LoggingHooks
@@ -22,15 +22,27 @@ from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.core.event_channel import EventChannel
 from app.tools.register import build_default_registry
 
-hooks = CompositeRunnerHooks([LoggingHooks()])
-middleware = CompositeRunnerMiddleware([
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not LLM_API_KEY:
+        raise RuntimeError(
+            "LLM_API_KEY is not set. "
+            "Please copy .env.example to .env and fill in your API key."
+        )
+    logger.info(f"Starting with model={LLM_MODEL_ID}, max_steps={MAX_STEPS}")
+    yield
+
+
+composite_hooks = CompositeRunnerHooks([LoggingHooks()])
+composite_middleware = CompositeRunnerMiddleware([
     HistoryTrimMiddleware(max_messages=20),
     ToolPermissionMiddleware(blocked_tools={"dangerous_tool"}),
 ])
-    
-app = FastAPI(title="Minimal Agent API")
+
+app = FastAPI(title="Minimal Agent API", lifespan=lifespan)
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT )
-runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=hooks, middleware=middleware)
+runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=composite_hooks, middleware=composite_middleware)
 session_manager : BaseSessionManager = InMemorySessionManager()
 tool_registry = build_default_registry()
 

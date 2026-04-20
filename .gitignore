@@ -1,8 +1,9 @@
 # Python
-__pycache__/
+__pycache__
 *.py[cod]
 *$py.class
 *.so
+*.pyc
 .Python
 build/
 develop-eggs/
@@ -35,3 +36,9 @@ env/
 .coverage
 htmlcov/
 .tox/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+app/agents/__pycache__/

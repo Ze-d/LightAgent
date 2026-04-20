@@ -1,4 +1,5 @@
 import logging
+import os
 
 
 def setup_logger(name: str = "minimal_agent") -> logging.Logger:
@@ -7,7 +8,8 @@ def setup_logger(name: str = "minimal_agent") -> logging.Logger:
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.DEBUG)
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
 
     handler = logging.StreamHandler()
     formatter = logging.Formatter(

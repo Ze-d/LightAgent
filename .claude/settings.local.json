@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"c:/02-study/Agent/MyAgent/.venv/Scripts/python.exe\" --version)",
+      "Bash(git -C \"c:/02-study/Agent/MyAgent\" status)"
+    ]
+  }
+}

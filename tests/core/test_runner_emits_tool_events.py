@@ -55,6 +55,7 @@ def test_runner_emits_tool_events(monkeypatch):
         tool_registry=registry,
     )
 
-    assert result == "结果是 5"
+    assert result["answer"] == "结果是 5"
     assert len(events) == 1
-    assert events[0]["status"] == "start"
+    assert events[0]["status"] == "success"
+    assert events[0]["tool_name"] == "calculator"

@@ -18,9 +18,9 @@ def test_tool_aware_agent_emits_event():
         "agent_name": "tool-aware-agent",
         "step": 1,
         "tool_name": "calculator",
-        "status": "start",
+        "status": "success",
     })
 
     assert len(events) == 1
     assert events[0]["tool_name"] == "calculator"
-    assert events[0]["status"] == "start"
+    assert events[0]["status"] == "success"

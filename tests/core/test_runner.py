@@ -16,7 +16,7 @@ def test_runner_returns_structured_result(monkeypatch):
     def fake_create(*args, **kwargs):
         return fake_response
 
-    monkeypatch.setattr(fake_client.responses, "create", fake_create)
+    fake_client.responses.create = fake_create
 
     runner = AgentRunner(client=fake_client, max_steps=3)
     agent = ChatAgent(

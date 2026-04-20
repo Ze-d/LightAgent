@@ -61,7 +61,8 @@ class AgentRunner:
                 "current_input": current_input,
             }
             try:
-                llm_context = self.middleware.before_llm(llm_context)
+                if self.middleware:
+                    llm_context = self.middleware.before_llm(llm_context)
             except MiddlewareAbort as e:
                 return {
                     "answer": e.message,
@@ -126,7 +127,8 @@ class AgentRunner:
                     }
 
                     try:
-                        tool_context = self.middleware.before_tool(tool_context)
+                        if self.middleware:
+                            tool_context = self.middleware.before_tool(tool_context)
                     except MiddlewareAbort as e:
                         error_event = {
                             "agent_name": agent.name,
@@ -137,7 +139,8 @@ class AgentRunner:
                             "error": e.message,
                         }
                         collected_events.append(error_event)
-                        self.hooks.on_tool_end(error_event)
+                        if effective_hooks:
+                            effective_hooks.on_tool_end(error_event)
                         agent.on_tool_event(error_event)
                         result = e.message
                     else:
@@ -158,11 +161,11 @@ class AgentRunner:
                             "status": "error",
                             "error": str(e),
                         }
+                        collected_events.append(tool_event)
                         agent.on_tool_event(tool_event)
                         if effective_hooks:
                             effective_hooks.on_tool_end(tool_event)
                     else:
-                        result = f"工具执行成功：{tool_name}"
                         tool_event : ToolCallEvent = {
                             "agent_name": agent.name,
                             "step": step,
@@ -171,7 +174,7 @@ class AgentRunner:
                             "status": "success",
                             "result": result,
                         }
-                        # 收集工具调用事件，供最终结果使用
+                        collected_events.append(tool_event)
                         agent.on_tool_event(tool_event)
                         # hooks: 工具调用后触发 tool_end 事件
                         if effective_hooks:
