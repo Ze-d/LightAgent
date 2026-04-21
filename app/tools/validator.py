@@ -3,11 +3,12 @@
 Provides type-safe tool registration with automatic OpenAI schema generation.
 """
 from functools import wraps
-from typing import Any, get_type_hints, get_origin, get_args
+from typing import Any, get_origin, get_args
 
-from pydantic import BaseModel, ValidationError, create_model
+from pydantic import BaseModel, ValidationError
 
 from app.configs.logger import logger
+from app.obj.types import ToolSpec
 
 
 def validate_params(model_cls: type[BaseModel]):
@@ -31,7 +32,7 @@ def validate_params(model_cls: type[BaseModel]):
         @wraps(func)
         def wrapper(**kwargs) -> str:
             try:
-                validated = model_cls.model_validate(kwargs)
+                validated = model_cls.model_validate(kwargs, strict=False)
                 return func(**validated.model_dump())
             except ValidationError as e:
                 errors = "; ".join(
@@ -149,7 +150,7 @@ def create_tool_spec(
     description: str,
     model_cls: type[BaseModel],
     handler,
-) -> dict[str, Any]:
+) -> ToolSpec:  # type: ignore[misc]
     """Create a ToolSpec dict from a Pydantic model and handler.
 
     Convenience function that combines parameter validation and schema generation.

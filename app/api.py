@@ -13,6 +13,7 @@ from app.hooks.logging_hooks import LoggingHooks
 from app.hooks.sse_hooks import SSEHooks
 from app.middleware.history_trim_middleware import HistoryTrimMiddleware
 from app.middleware.tool_permission_middleware import ToolPermissionMiddleware
+from app.security.input_guard import InputGuardMiddleware
 from app.prompts.prompt import SYSTEM_PROMPT
 from app.configs.logger import logger
 from app.obj.schemas import ChatRequest, ChatResponse
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 composite_hooks = CompositeRunnerHooks([LoggingHooks()])
 composite_middleware = CompositeRunnerMiddleware([
+    InputGuardMiddleware(),
     HistoryTrimMiddleware(max_messages=20),
     ToolPermissionMiddleware(blocked_tools={"dangerous_tool"}),
 ])

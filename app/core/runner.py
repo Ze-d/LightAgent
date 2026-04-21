@@ -1,5 +1,6 @@
 import json
 from openai import OpenAI
+import asyncio
 
 from app.configs.logger import logger
 from app.core.hooks import BaseRunnerHooks
@@ -228,6 +229,10 @@ class AgentRunner:
                             self._circuit_breakers[tool_name] = cb
 
                         def tool_call() -> str:
+                            if tool_registry.is_async(tool_name):
+                                return asyncio.run(
+                                    tool_registry.call_async(tool_name, **tool_args)
+                                )
                             return tool_registry.call(tool_name, **tool_args)
 
                         try:

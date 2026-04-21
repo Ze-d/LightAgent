@@ -1,7 +1,18 @@
+"""Built-in tools with Pydantic-based parameter validation."""
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel
+
 from app.tools.sandbox import safe_eval
+
+
+class CalculatorInput(BaseModel):
+    expression: str
+
+
+class GetCurrentTimeInput(BaseModel):
+    city: str
 
 
 def calculator(expression: str) -> str:
