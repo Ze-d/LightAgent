@@ -1,11 +1,17 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.tools.sandbox import safe_eval
+
 
 def calculator(expression: str) -> str:
     try:
-        result = eval(expression, {"__builtins__": {}}, {})
+        result = safe_eval(expression)
+        if isinstance(result, float) and result == int(result):
+            return str(int(result))
         return str(result)
+    except ValueError as e:
+        return f"Calculation error: {e}"
     except Exception as e:
         return f"Calculation error: {e}"
 

@@ -20,7 +20,11 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 # Virtual environments
 venv/
 ENV/
@@ -42,3 +46,31 @@ htmlcov/
 .env.*
 !.env.example
 app/agents/__pycache__/
+app/agents/__pycache__/tool_aware_agent.cpython-314.pyc
+app/configs/__pycache__/logger.cpython-314.pyc
+app/core/__pycache__/runner.cpython-313.pyc
+app/core/__pycache__/runner.cpython-314.pyc
+app/core/__pycache__/session_manager.cpython-314.pyc
+app/core/__pycache__/tool_registry.cpython-313.pyc
+app/listener/__pycache__/sse_listener.cpython-314.pyc
+app/obj/__pycache__/types.cpython-314.pyc
+app/tools/__pycache__/__init__.cpython-314.pyc
+tests/__pycache__/test_agent.cpython-314-pytest-9.0.3.pyc
+tests/agents/__pycache__/test_tool_aware_agent.cpython-314-pytest-9.0.3.pyc
+tests/core/__pycache__/test_runner_emits_tool_events.cpython-314-pytest-9.0.3.pyc
+tests/core/__pycache__/test_runner.cpython-314-pytest-9.0.3.pyc
+app/agents/__pycache__/agent_base.cpython-314.pyc
+app/agents/__pycache__/chat_agent.cpython-313.pyc
+app/agents/__pycache__/tool_aware_agent.cpython-314.pyc
+app/configs/__pycache__/logger.cpython-314.pyc
+app/core/__pycache__/runner.cpython-313.pyc
+app/core/__pycache__/runner.cpython-314.pyc
+app/core/__pycache__/session_manager.cpython-314.pyc
+app/core/__pycache__/tool_registry.cpython-313.pyc
+app/listener/__pycache__/sse_listener.cpython-314.pyc
+app/obj/__pycache__/types.cpython-314.pyc
+app/tools/__pycache__/__init__.cpython-314.pyc
+tests/__pycache__/test_agent.cpython-314-pytest-9.0.3.pyc
+tests/agents/__pycache__/test_tool_aware_agent.cpython-314-pytest-9.0.3.pyc
+tests/core/__pycache__/test_runner_emits_tool_events.cpython-314-pytest-9.0.3.pyc
+tests/core/__pycache__/test_runner.cpython-314-pytest-9.0.3.pyc
