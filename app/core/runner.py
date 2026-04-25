@@ -15,6 +15,7 @@ from app.core.resilience import (
     CircuitBreaker,
     CircuitBreakerOpenError,
 )
+from app.core.rate_limiter import TokenRateLimiter
 from app.core.tracing import get_tracer, AgentSpan
 
 DEFAULT_LLM_TIMEOUT = 30.0
@@ -31,6 +32,8 @@ class AgentRunner:
         llm_timeout: float = DEFAULT_LLM_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         enable_tracing: bool = True,
+        rate_limiter: TokenRateLimiter | None = None,
+        llm_circuit_breaker: CircuitBreaker | None = None,
     ):
         self.client = client
         self.max_steps = max_steps
@@ -39,6 +42,8 @@ class AgentRunner:
         self.llm_timeout = llm_timeout
         self.max_retries = max_retries
         self.enable_tracing = enable_tracing
+        self.rate_limiter = rate_limiter
+        self.llm_circuit_breaker = llm_circuit_breaker
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
 
     def run(
@@ -110,6 +115,21 @@ class AgentRunner:
                 if span:
                     span.start_llm_span(len(current_input))
 
+                if self.rate_limiter:
+                    self.rate_limiter.acquire(timeout=5.0)
+
+                if self.llm_circuit_breaker and self.llm_circuit_breaker.state == CircuitBreaker.OPEN:
+                    if span:
+                        span.end_current_span()
+                        span.end_all()
+                    return {
+                        "answer": "LLM 服务暂时不可用（熔断器打开），请稍后重试。",
+                        "success": False,
+                        "steps": step,
+                        "tool_events": collected_events,
+                        "error": "llm_circuit_breaker_open",
+                    }
+
                 def llm_call():
                     return self.client.responses.create(
                         model=agent.model,
@@ -122,6 +142,8 @@ class AgentRunner:
                 except ToolTimeoutError:
                     if span:
                         span.end_current_span(error=ToolTimeoutError(f"LLM call exceeded {self.llm_timeout}s"))
+                    if self.llm_circuit_breaker:
+                        self.llm_circuit_breaker.record_failure()
                     if self.max_retries > 1:
                         from tenacity import retry, stop_after_attempt, wait_exponential
                         retry_decorator = retry(
@@ -140,6 +162,27 @@ class AgentRunner:
                             "tool_events": collected_events,
                             "error": "llm_timeout",
                         }
+                except RateLimitError as e:
+                    if span:
+                        span.end_current_span(error=e)
+                    if self.llm_circuit_breaker:
+                        self.llm_circuit_breaker.record_failure()
+                    if span:
+                        span.end_all()
+                    return {
+                        "answer": f"请求过于频繁，请稍后重试。",
+                        "success": False,
+                        "steps": step,
+                        "tool_events": collected_events,
+                        "error": "rate_limit_exceeded",
+                    }
+                except Exception as e:
+                    if self.llm_circuit_breaker:
+                        self.llm_circuit_breaker.record_failure()
+                    raise
+
+                if self.llm_circuit_breaker:
+                    self.llm_circuit_breaker.record_success()
 
                 if span:
                     span.end_current_span()
