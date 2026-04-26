@@ -4,6 +4,8 @@ from app.obj.types import (
     LLMStartEvent,
     LLMEndEvent,
     ToolCallEvent,
+    SkillInvokeEvent,
+    SkillCallEvent,
 )
 
 
@@ -25,7 +27,13 @@ class BaseRunnerHooks:
 
     def on_tool_end(self, event: ToolCallEvent) -> None:
         pass
-    
+
+    def on_skill_invoke(self, event: SkillInvokeEvent) -> None:
+        pass
+
+    def on_skill_end(self, event: SkillCallEvent) -> None:
+        pass
+
 class CompositeRunnerHooks(BaseRunnerHooks):
     def __init__(self, hooks: list[BaseRunnerHooks] | None = None):
         self.hooks = hooks or []
@@ -53,3 +61,11 @@ class CompositeRunnerHooks(BaseRunnerHooks):
     def on_tool_end(self, event: ToolCallEvent) -> None:
         for hook in self.hooks:
             hook.on_tool_end(event)
+
+    def on_skill_invoke(self, event: SkillInvokeEvent) -> None:
+        for hook in self.hooks:
+            hook.on_skill_invoke(event)
+
+    def on_skill_end(self, event: SkillCallEvent) -> None:
+        for hook in self.hooks:
+            hook.on_skill_end(event)

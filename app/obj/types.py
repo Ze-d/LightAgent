@@ -77,3 +77,26 @@ class ToolContext(TypedDict):
     step: int
     tool_name: str
     arguments: dict[str, Any]
+
+
+# Skill types
+class SkillSpec(TypedDict):
+    name: str
+    description: str
+    parameters: dict[str, Any] | None
+    handler: Callable[..., Any]
+
+
+class SkillInvokeEvent(TypedDict):
+    agent_name: str
+    skill_name: str
+    raw_input: str
+
+
+class SkillCallEvent(TypedDict, total=False):
+    agent_name: str
+    skill_name: str
+    arguments: dict[str, Any]
+    result: Any
+    status: Literal["start", "success", "error"]
+    error: str

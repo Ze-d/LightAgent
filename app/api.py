@@ -23,6 +23,8 @@ from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.core.event_channel import EventChannel
 from app.core.checkpoint import CheckpointManager, Checkpoint
 from app.tools.register import build_default_registry
+from app.skills.register import build_default_skills
+from app.core.skill_dispatcher import SkillDispatcher
 
 
 @asynccontextmanager
@@ -49,6 +51,9 @@ runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=composite_hooks, 
 session_manager : BaseSessionManager = InMemorySessionManager()
 checkpoint_manager = CheckpointManager()
 tool_registry = build_default_registry()
+skill_registry = build_default_skills()
+skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)
+runner.skill_dispatcher = skill_dispatcher
 
 
 

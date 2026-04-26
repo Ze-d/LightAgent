@@ -18,6 +18,7 @@ from app.core.resilience import (
 from app.core.rate_limiter import TokenRateLimiter
 from app.core.tracing import get_tracer, AgentSpan
 from app.core.checkpoint import CheckpointManager
+from app.core.skill_dispatcher import SkillDispatcher
 
 DEFAULT_LLM_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
@@ -35,6 +36,7 @@ class AgentRunner:
         enable_tracing: bool = True,
         rate_limiter: TokenRateLimiter | None = None,
         llm_circuit_breaker: CircuitBreaker | None = None,
+        skill_dispatcher: SkillDispatcher | None = None,
     ):
         self.client = client
         self.max_steps = max_steps
@@ -45,6 +47,7 @@ class AgentRunner:
         self.enable_tracing = enable_tracing
         self.rate_limiter = rate_limiter
         self.llm_circuit_breaker = llm_circuit_breaker
+        self.skill_dispatcher = skill_dispatcher
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
 
     def run(
@@ -78,6 +81,23 @@ class AgentRunner:
         span = AgentSpan(tracer) if tracer else None
         if span:
             span.start_run_span(agent.name, agent.model, self.max_steps)
+
+        # Check for slash command before LLM call
+        if self.skill_dispatcher and history:
+            last_msg = history[-1]
+            if isinstance(last_msg, dict) and last_msg.get("role") == "user":
+                raw_input = last_msg.get("content", "")
+                invoked, result = self.skill_dispatcher.try_invoke(raw_input, agent.name)
+                if invoked:
+                    if span:
+                        span.end_all()
+                    return {
+                        "answer": result,
+                        "success": True,
+                        "steps": 0,
+                        "tool_events": [],
+                        "error": None,
+                    }
 
         try:
             for step in range(1, self.max_steps + 1):
