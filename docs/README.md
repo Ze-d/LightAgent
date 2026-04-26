@@ -28,11 +28,17 @@
 | 能力 | 说明 |
 |------|------|
 | **Agent 运行时** | 基于 OpenAI Responses API 的 Agent 执行循环，支持多步推理和工具调用 |
-| **工具注册中心** | `ToolRegistry` 管理工具定义与执行，内置 `calculator`、`get_current_time` |
+| **工具注册中心** | `ToolRegistry` 管理工具定义与执行，内置 `calculator`、`get_current_time`，支持沙箱参数校验 |
 | **会话管理** | `SessionManager` 抽象会话存储，默认提供 `InMemorySessionManager` |
 | **Hooks 机制** | 在 `run_start`、`llm_start`、`llm_end`、`tool_end` 等生命周期节点插入逻辑 |
 | **Middleware 机制** | 在 LLM 调用前/工具调用前拦截和修改上下文，支持 `before_llm`、`before_tool` |
 | **SSE 流式** | `/chat/stream` 通过 `EventChannel` 实现实时事件推送 |
+| **链路追踪** | OpenTelemetry 集成，支持 Trace ID 串联 LLM 调用 → 工具执行 → 响应全链路 |
+| **限流保护** | `TokenRateLimiter` 基于 Token Bucket 算法，防止 LLM API 过载 |
+| **韧性机制** | 超时控制、重试策略（指数退避）、熔断器模式 |
+| **记忆压缩** | `MemorySummarizer` 对过长历史消息进行 LLM 摘要压缩 |
+| **安全过滤** | `InputGuard` 中间件防护 Prompt Injection / XSS 等攻击 |
+| **断点恢复** | `CheckpointManager` 支持 Agent 执行中途断点续算 |
 
 ---
 
@@ -85,32 +91,38 @@ MyAgent/
 │   │   ├── session_manager.py # BaseSessionManager / InMemorySessionManager
 │   │   ├── event_channel.py   # EventChannel，SSE 事件通道
 │   │   ├── hooks.py           # BaseRunnerHooks / CompositeRunnerHooks
-│   │   └── middleware.py      # BaseRunnerMiddleware / CompositeRunnerMiddleware
+│   │   ├── middleware.py      # BaseRunnerMiddleware / CompositeRunnerMiddleware
+│   │   ├── resilience.py      # 超时、重试、熔断器
+│   │   ├── tracing.py         # OpenTelemetry 链路追踪
+│   │   ├── rate_limiter.py    # TokenBucket 限流器
+│   │   └── checkpoint.py      # Checkpoint 状态快照
 │   ├── hooks/
-│   │   ├── logging_hooks.py    # LoggingHooks，日志记录实现
+│   │   ├── logging_hooks.py   # LoggingHooks，日志记录实现
 │   │   └── sse_hooks.py       # SSEHooks，SSE 事件发布
 │   ├── middleware/
 │   │   ├── history_trim_middleware.py    # 历史裁剪中间件
 │   │   └── tool_permission_middleware.py  # 工具权限控制中间件
 │   ├── tools/
-│   │   ├── builtin_tools.py    # 内置工具：calculator, get_current_time
-│   │   └── register.py        # build_default_registry 工厂函数
-│   ├── listener/
-│   │   ├── log_listener.py     # 日志监听器
-│   │   └── sse_listener.py     # SSE 监听器
+│   │   ├── builtin_tools.py   # 内置工具：calculator, get_current_time
+│   │   ├── sandbox.py         # 工具参数沙箱校验
+│   │   ├── register.py        # build_default_registry 工厂函数
+│   │   └── validator.py      # 工具参数 Pydantic 校验
+│   ├── memory/
+│   │   └── summarizer.py      # 记忆摘要压缩
+│   ├── security/
+│   │   └── input_guard.py     # 输入安全过滤
 │   ├── obj/
-│   │   ├── schemas.py          # Pydantic 请求/响应模型
-│   │   └── types.py            # 类型定义（Event、Message 等）
+│   │   ├── schemas.py         # Pydantic 请求/响应模型
+│   │   └── types.py           # 类型定义（Event、Message 等）
 │   ├── prompts/
-│   │   └── prompt.py           # SYSTEM_PROMPT 系统提示词
-│   ├── storage/
-│   │   └── session_store.py    # Session 存储接口
+│   │   └── prompt.py          # SYSTEM_PROMPT 系统提示词
 │   ├── exceptions/
-│   │   └── agent.py            # Agent 相关异常定义
-│   └── middleware/            # Middleware 模块（别名）
-├── docs/                       # 项目文档
+│   │   └── agent.py           # Agent 相关异常定义
+│   └── listener/              # 预留目录（暂无内容）
+├── docs/                      # 项目文档
+├── tests/                     # 测试文件
 ├── requirements.txt           # Python 依赖
-└── .env                        # 环境变量（本地）
+└── .env                       # 环境变量（本地）
 ```
 
 ---

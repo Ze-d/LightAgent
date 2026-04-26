@@ -15,23 +15,23 @@ MyAgent 是一个 Python Agent 开发框架，已实现核心组件：
 
 ### P0 —— 立即修复/实现
 
-| 功能 | 缺陷/价值 | 关键文件 |
-|------|----------|---------|
-| **工具沙箱** | `calculator` 用 `eval()` 存在代码注入风险 | `app/tools/builtin_tools.py` |
-| **请求超时 + 重试** | API 无限等待，网络抖动直接失败 | `app/core/runner.py` |
-| **OpenTelemetry Tracing** | 无 Trace ID 串联全链路事件 | `app/core/hooks.py` |
+| 功能 | 状态 | 关键文件 |
+|------|------|---------|
+| **工具沙箱** | ✅ 已实现 (`app/tools/sandbox.py`) | `app/tools/builtin_tools.py` |
+| **请求超时 + 重试** | ✅ 已实现 (`app/core/resilience.py`) | `app/core/runner.py` |
+| **OpenTelemetry Tracing** | ✅ 已实现 (`app/core/tracing.py`) | `app/core/hooks.py` |
 
 ### P1 —— 完善生产可用性
 
-| 功能 | 价值 | 关键文件 |
+| 功能 | 状态 | 关键文件 |
 |------|------|---------|
-| **Pydantic 参数校验装饰器** | 工具参数无校验层 | 新建 `app/tools/validator.py` |
-| **异步工具支持** | 全部同步工具无法处理 IO 密集型任务 | `app/core/runner.py` |
-| **记忆摘要压缩** | 消息历史仅截断，无语义压缩 | `app/memory/summarizer.py` |
-| **输入过滤 Middleware** | 无 Prompt Injection / XSS 防护 | `app/security/content_filter.py` |
-| **Token 限流** | 无限流，流量突增直接压垮 LLM | `app/core/rate_limiter.py` |
-| **熔断器模式** | 单一工具故障导致整体失败 | `app/core/circuit_breaker.py` |
-| **语义向量记忆 (RAG)** | 无长期记忆和检索能力 | `app/memory/vector_store.py` |
+| **Pydantic 参数校验装饰器** | ✅ 已实现 (`app/tools/validator.py`) | 新建 `app/tools/validator.py` |
+| **异步工具支持** | 🔲 待实现 | `app/core/runner.py` |
+| **记忆摘要压缩** | ✅ 已实现 (`app/memory/summarizer.py`) | `app/memory/summarizer.py` |
+| **输入过滤 Middleware** | ✅ 已实现 (`app/security/input_guard.py`) | `app/security/input_guard.py` |
+| **Token 限流** | ✅ 已实现 (`app/core/rate_limiter.py`) | `app/core/rate_limiter.py` |
+| **熔断器模式** | ✅ 已实现 (`app/core/resilience.py`) | `app/core/circuit_breaker.py` |
+| **语义向量记忆 (RAG)** | 🔲 待实现 | `app/memory/vector_store.py` |
 
 ### P2 —— 高级特性
 
@@ -125,4 +125,12 @@ class MemorySummarizer:
 - [tool_registry.py](app/core/tool_registry.py) — 工具注册与调用链路
 - [middleware.py](app/core/middleware.py) — Middleware 鉴权链插入点
 - [hooks.py](app/core/hooks.py) — 生命周期钩子，可观测性和记忆系统的旁路监听点
-- [builtin_tools.py](app/tools/builtin_tools.py) — 当前 eval 实现，需替换为沙箱
+- [builtin_tools.py](app/tools/builtin_tools.py) — 内置工具实现
+- [sandbox.py](app/tools/sandbox.py) — 工具参数沙箱校验（已替代 eval）
+- [resilience.py](app/core/resilience.py) — 超时、重试、熔断器
+- [tracing.py](app/core/tracing.py) — OpenTelemetry 链路追踪
+- [rate_limiter.py](app/core/rate_limiter.py) — TokenBucket 限流
+- [summarizer.py](app/memory/summarizer.py) — 记忆摘要压缩
+- [input_guard.py](app/security/input_guard.py) — 输入安全过滤
+
+*最后更新：2026/04/26*

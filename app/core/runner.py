@@ -17,6 +17,7 @@ from app.core.resilience import (
 )
 from app.core.rate_limiter import TokenRateLimiter
 from app.core.tracing import get_tracer, AgentSpan
+from app.core.checkpoint import CheckpointManager
 
 DEFAULT_LLM_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
@@ -52,6 +53,8 @@ class AgentRunner:
         history: list[ChatMessage],
         tool_registry: ToolRegistry | None = None,
         hooks: BaseRunnerHooks | None = None,
+        session_id: str | None = None,
+        checkpoint_manager: CheckpointManager | None = None,
     ) -> AgentRunResult:
         effective_hooks = hooks if hooks is not None else self.hooks
         tracer = get_tracer() if self.enable_tracing else None
@@ -199,6 +202,13 @@ class AgentRunner:
                 ]
 
                 if not function_calls:
+                    if checkpoint_manager and session_id:
+                        checkpoint_manager.save(
+                            session_id=session_id,
+                            step=step,
+                            history=list(current_input),
+                            agent_state=agent.get_state(),
+                        )
                     if span:
                         span.end_all()
                     return {
@@ -355,6 +365,14 @@ class AgentRunner:
                     })
 
                 current_input = next_input
+
+                if checkpoint_manager and session_id:
+                    checkpoint_manager.save(
+                        session_id=session_id,
+                        step=step,
+                        history=list(current_input),
+                        agent_state=agent.get_state(),
+                    )
 
             if span:
                 span.end_all()

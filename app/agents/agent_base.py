@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
+from typing import Any
 from app.obj.types import ToolCallEvent
+
 
 class BaseAgent(ABC):
     def __init__(self, name: str, model: str):
@@ -8,12 +10,21 @@ class BaseAgent(ABC):
 
     @abstractmethod
     def get_system_prompt(self) -> str:
-        """返回当前 Agent 的 system prompt"""
+        """Return current agent's system prompt"""
         pass
 
     @abstractmethod
     def supports_tools(self) -> bool:
-        """标记当前 Agent 是否支持工具调用"""
+        """Check if the agent supports tool calling"""
         pass
+
     def on_tool_event(self, event: ToolCallEvent) -> None:
+        pass
+
+    def get_state(self) -> dict[str, Any]:
+        """Return agent state for checkpoint recovery"""
+        return {}
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """Restore agent state from checkpoint"""
         pass

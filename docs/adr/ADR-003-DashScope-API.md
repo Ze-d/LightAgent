@@ -31,7 +31,7 @@ Accepted
 
 采用 **方案 B：DashScope API**
 
-具体模型使用 `qwen3.5-flash`（通过 `gpt-5.4-mini` 接口名兼容），`base_url` 为 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
+具体模型使用 `qwen3.5-flash`，`base_url` 为 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
 
 ## 原因
 

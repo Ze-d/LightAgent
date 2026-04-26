@@ -1,3 +1,4 @@
+from typing import Any
 from app.agents.chat_agent import ChatAgent
 from app.obj.types import ToolCallEvent
 
@@ -16,3 +17,9 @@ class ToolAwareAgent(ChatAgent):
 
     def emit_tool_event(self, event: ToolCallEvent) -> None:
         self.on_tool_event(event)
+
+    def get_state(self) -> dict[str, Any]:
+        return {"tool_event_history": list(self.tool_event_history)}
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        self.tool_event_history = list(state.get("tool_event_history", []))

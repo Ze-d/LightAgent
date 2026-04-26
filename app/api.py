@@ -21,6 +21,7 @@ from app.obj.types import ChatMessage
 from app.core.runner import AgentRunner
 from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.core.event_channel import EventChannel
+from app.core.checkpoint import CheckpointManager, Checkpoint
 from app.tools.register import build_default_registry
 
 
@@ -46,6 +47,7 @@ app = FastAPI(title="Minimal Agent API", lifespan=lifespan)
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT )
 runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=composite_hooks, middleware=composite_middleware)
 session_manager : BaseSessionManager = InMemorySessionManager()
+checkpoint_manager = CheckpointManager()
 tool_registry = build_default_registry()
 
 
@@ -76,22 +78,35 @@ def chat(req: ChatRequest) -> ChatResponse:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session not found: {session_id}"
             )
-    # 2. 创建 ToolAwareAgent，注入工具调用事件监听器
+
+    # 2. 创建ToolAwareAgent并检查checkpoint恢复
     agent = ToolAwareAgent(
-    name="chat-agent",
-    model=LLM_MODEL_ID,
-    system_prompt=SYSTEM_PROMPT,
-)
-    # 2. 追加用户消息
+        name="chat-agent",
+        model=LLM_MODEL_ID,
+        system_prompt=SYSTEM_PROMPT,
+    )
+    checkpoint = checkpoint_manager.load(session_id)
+    if checkpoint:
+        logger.info(f"Restoring from checkpoint: session_id={session_id}, step={checkpoint.step}")
+        history = checkpoint.history
+        agent.restore_state(checkpoint.agent_state)
+
+    # 3. 追加用户消息
     history.append({
         "role": "user",
         "content": req.message,
     })
-    session_manager.save(session_id, history)  # 保存用户消息后的状态，以便工具调用时能拿到最新历史
+    session_manager.save(session_id, history)
 
-    # 3. 调用 Agent
+    # 4. 调用 Agent
     try:
-        run_result = runner.run(agent, history, tool_registry)
+        run_result = runner.run(
+            agent=agent,
+            history=history,
+            tool_registry=tool_registry,
+            session_id=session_id,
+            checkpoint_manager=checkpoint_manager,
+        )
         answer = run_result["answer"]
     except Exception as e:
         logger.exception("Agent run failed")
@@ -146,19 +161,24 @@ async def chat_stream(req: ChatRequest):
             return
         history = loaded_history
 
-    # 2. 追加用户消息
-    history.append({
-        "role": "user",
-        "content": req.message,
-    })
-
-    # 3. 创建 ToolAwareAgent
-    loop = asyncio.get_running_loop()
+    # 2. 创建ToolAwareAgent并检查checkpoint恢复
     agent = ToolAwareAgent(
         name="chat-agent",
         model=LLM_MODEL_ID,
         system_prompt=SYSTEM_PROMPT,
     )
+    checkpoint = checkpoint_manager.load(session_id)
+    if checkpoint:
+        logger.info(f"Restoring from checkpoint: session_id={session_id}, step={checkpoint.step}")
+        history = checkpoint.history
+        agent.restore_state(checkpoint.agent_state)
+
+    # 3. 追加用户消息
+    history.append({
+        "role": "user",
+        "content": req.message,
+    })
+
     # 4. 在后台跑 runner，过程中事件会持续进入 channel
     async def run_agent():
         try:
@@ -171,6 +191,8 @@ async def chat_stream(req: ChatRequest):
                     history=history,
                     tool_registry=tool_registry,
                     hooks=run_hooks,
+                    session_id=session_id,
+                    checkpoint_manager=checkpoint_manager,
                 )
             )
             answer = run_result["answer"]
@@ -200,3 +222,25 @@ async def chat_stream(req: ChatRequest):
 
     async for event in channel.stream():
         yield event
+
+
+@app.get("/checkpoint/{session_id}")
+def get_checkpoint(session_id: str):
+    checkpoint = checkpoint_manager.load(session_id)
+    if checkpoint is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No checkpoint found for session: {session_id}"
+        )
+    return {
+        "session_id": session_id,
+        "step": checkpoint.step,
+        "history_length": len(checkpoint.history),
+        "timestamp": checkpoint.timestamp.isoformat(),
+    }
+
+
+@app.delete("/checkpoint/{session_id}")
+def delete_checkpoint(session_id: str):
+    checkpoint_manager.clear(session_id)
+    return {"message": f"Checkpoint cleared for session: {session_id}"}

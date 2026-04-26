@@ -34,8 +34,14 @@
 | **core/event_channel** | `app/core/event_channel.py` | SSE 事件通道，异步队列 |
 | **core/hooks** | `app/core/hooks.py` | 生命周期钩子机制 |
 | **core/middleware** | `app/core/middleware.py` | 中间件机制，拦截 LLM/工具调用 |
+| **core/resilience** | `app/core/resilience.py` | 超时、重试、熔断器 |
+| **core/tracing** | `app/core/tracing.py` | OpenTelemetry 链路追踪 |
+| **core/rate_limiter** | `app/core/rate_limiter.py` | TokenBucket 限流器 |
+| **core/checkpoint** | `app/core/checkpoint.py` | 断点状态快照与恢复 |
 | **hooks** | `app/hooks/` | 钩子实现：LoggingHooks, SSEHooks |
 | **middleware** | `app/middleware/` | 中间件实现：HistoryTrimMiddleware, ToolPermissionMiddleware |
+| **memory** | `app/memory/` | 记忆摘要压缩 |
+| **security** | `app/security/` | 输入安全过滤 |
 | **tools** | `app/tools/` | 内置工具：calculator, get_current_time |
 
 ---
@@ -80,19 +86,23 @@ ToolAwareAgent + AgentRunner.run()
 
 | 依赖 | 类型 | 说明 |
 |------|------|------|
-| **DashScope API** | 外部服务 | 阿里云 LLM（gpt-5.4-mini 接口，实际 qwen3.5-flash） |
+| **DashScope API** | 外部服务 | 阿里云 LLM（OpenAI 兼容接口，实际 qwen3.5-flash） |
 | **openai** | Python 库 | OpenAI 兼容客户端 |
 | **python-dotenv** | Python 库 | .env 环境变量加载 |
 | **InMemorySessionManager** | 内存存储 | 会话存储（无持久化） |
+| **OpenTelemetry** | Python 库 | 链路追踪（可选，OTLP 导出） |
+| **tenacity** | Python 库 | 重试策略（指数退避） |
+| **TokenRateLimiter** | 内存存储 | LLM API 限流（Token Bucket） |
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `LLM_API_KEY` | 必填 | DashScope API 密钥 |
-| `LLM_MODEL_ID` | `gpt-5.4-mini` | 模型名称 |
+| `LLM_MODEL_ID` | `qwen3.5-flash` | 模型名称 |
 | `LLM_BASE_URL` | 阿里云地址 | API 服务地址 |
 | `MAX_STEPS` | `5` | Agent 最大执行步数 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 可选 | OpenTelemetry OTLP 收集器地址 |
 
 ---
 
@@ -185,4 +195,4 @@ ToolCallEvent 收集 → 返回给 LLM 继续推理
 
 ---
 
-*最后更新：2026/04/14*
+*最后更新：2026/04/26*
