@@ -25,6 +25,8 @@ from app.core.checkpoint import CheckpointManager, Checkpoint
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
+from app.mcp.config import load_mcp_config
+from app.mcp.tool_registry import MCPToolRegistry
 
 
 @asynccontextmanager
@@ -54,6 +56,18 @@ tool_registry = build_default_registry()
 skill_registry = build_default_skills()
 skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)
 runner.skill_dispatcher = skill_dispatcher
+
+mcp_configs = load_mcp_config()
+if mcp_configs:
+    mcp_registry = MCPToolRegistry(tool_registry)
+    for config in mcp_configs:
+        mcp_registry.register_mcp_server(
+            name=config.name,
+            command=config.command,
+            env=config.env,
+            transport=config.transport,
+            server_url=config.server_url,
+        )
 
 
 
