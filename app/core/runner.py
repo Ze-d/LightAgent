@@ -50,6 +50,14 @@ class AgentRunner:
         self.skill_dispatcher = skill_dispatcher
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
 
+    def _clear_checkpoint(
+        self,
+        checkpoint_manager: CheckpointManager | None,
+        session_id: str | None,
+    ) -> None:
+        if checkpoint_manager and session_id:
+            checkpoint_manager.clear(session_id)
+
     def run(
         self,
         agent: BaseAgent,
@@ -91,6 +99,7 @@ class AgentRunner:
                 if invoked:
                     if span:
                         span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return {
                         "answer": result,
                         "success": True,
@@ -126,6 +135,7 @@ class AgentRunner:
                     if span:
                         span.end_current_span()
                         span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return {
                         "answer": e.message,
                         "success": False,
@@ -145,6 +155,7 @@ class AgentRunner:
                     if span:
                         span.end_current_span()
                         span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return {
                         "answer": "LLM 服务暂时不可用（熔断器打开），请稍后重试。",
                         "success": False,
@@ -178,6 +189,7 @@ class AgentRunner:
                     else:
                         if span:
                             span.end_all()
+                        self._clear_checkpoint(checkpoint_manager, session_id)
                         return {
                             "answer": f"LLM 调用超时（{self.llm_timeout}s），请稍后重试。",
                             "success": False,
@@ -192,6 +204,7 @@ class AgentRunner:
                         self.llm_circuit_breaker.record_failure()
                     if span:
                         span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return {
                         "answer": f"请求过于频繁，请稍后重试。",
                         "success": False,
@@ -222,15 +235,9 @@ class AgentRunner:
                 ]
 
                 if not function_calls:
-                    if checkpoint_manager and session_id:
-                        checkpoint_manager.save(
-                            session_id=session_id,
-                            step=step,
-                            history=list(current_input),
-                            agent_state=agent.get_state(),
-                        )
                     if span:
                         span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return {
                         "answer": response.output_text or "模型没有返回文本结果。",
                         "success": True,
@@ -242,6 +249,7 @@ class AgentRunner:
                 if tool_registry is None:
                     if span:
                         span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return {
                         "answer": "当前 Agent 未配置工具注册中心。",
                         "success": False,
@@ -396,6 +404,7 @@ class AgentRunner:
 
             if span:
                 span.end_all()
+            self._clear_checkpoint(checkpoint_manager, session_id)
             return {
                 "answer": "抱歉，任务执行步数过多，已停止。",
                 "success": False,

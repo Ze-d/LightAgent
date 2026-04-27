@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 from typing import Any
 
 from app.core.tool_registry import ToolRegistry
@@ -7,13 +9,19 @@ from app.mcp.errors import MCPError
 from app.obj.types import ToolSpec
 
 
+async def _await_if_needed(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 class MCPToolRegistry:
     def __init__(self, inner_registry: ToolRegistry):
         self._inner = inner_registry
         self._mcp_clients: dict[str, MCPClient] = {}
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
 
-    def register_mcp_server(
+    async def register_mcp_server(
         self,
         name: str,
         command: list[str] | None = None,
@@ -21,6 +29,7 @@ class MCPToolRegistry:
         transport: str = "stdio",
         server_url: str | None = None,
         timeout: float = 30.0,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         client = MCPClient(
             name=name,
@@ -29,10 +38,11 @@ class MCPToolRegistry:
             transport=transport,
             server_url=server_url,
             timeout=timeout,
+            extra_env=extra_env,
         )
-        client.start()
+        await _await_if_needed(client.start())
 
-        mcp_tools = client.list_tools()
+        mcp_tools = await _await_if_needed(client.list_tools())
         for mcp_tool in mcp_tools:
             spec = self._mcp_tool_to_spec(client, mcp_tool)
             self._inner.register(spec)
@@ -44,8 +54,8 @@ class MCPToolRegistry:
         description = mcp_tool.get("description", "")
         parameters = mcp_tool.get("inputSchema", {})
 
-        def handler(**kwargs: Any) -> str:
-            return client.call_tool(mcp_tool["name"], kwargs)
+        async def handler(**kwargs: Any) -> str:
+            return await _await_if_needed(client.call_tool(mcp_tool["name"], kwargs))
 
         return ToolSpec(
             name=namespaced_name,
@@ -75,7 +85,10 @@ class MCPToolRegistry:
             cb = self._get_cb(client_name)
 
             def do_call() -> str:
-                return client.call_tool(tool_name, kwargs)
+                result = client.call_tool(tool_name, kwargs)
+                if inspect.isawaitable(result):
+                    return asyncio.run(result)
+                return result
 
             try:
                 return cb.call(do_call)
@@ -89,7 +102,7 @@ class MCPToolRegistry:
             client = self._mcp_clients.get(client_name)
             if client is None:
                 raise ValueError(f"Unknown MCP client: {client_name}")
-            return client.call_tool(tool_name, kwargs)
+            return await _await_if_needed(client.call_tool(tool_name, kwargs))
         return await self._inner.call_async(name, **kwargs)
 
     def is_async(self, name: str) -> bool:

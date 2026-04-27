@@ -3,6 +3,7 @@ import pytest
 import asyncio
 from app.core.tool_registry import ToolRegistry
 from app.memory.summarizer import MessageSummarizer
+from app.middleware.history_trim_middleware import HistoryTrimMiddleware
 from app.security.input_guard import InputGuardMiddleware
 from app.core.middleware import MiddlewareAbort
 
@@ -75,6 +76,35 @@ class TestMemorySummarizer:
         result = summarizer.summarize(messages)
         assert result[0]["role"] == "system"
         assert result[0]["content"] == "System prompt"
+
+
+class TestHistoryTrimMiddleware:
+    def test_summarizes_large_chat_history(self):
+        middleware = HistoryTrimMiddleware(max_messages=5)
+        messages = [{"role": "system", "content": "System prompt"}]
+        for i in range(10):
+            messages.append({"role": "user", "content": f"Message {i}"})
+
+        context = {"current_input": messages}
+        result = middleware.before_llm(context)
+
+        current_input = result["current_input"]
+        assert len(current_input) <= 5
+        assert current_input[0]["content"] == "System prompt"
+        assert "summary" in current_input[1]["content"].lower()
+
+    def test_does_not_summarize_tool_outputs(self):
+        middleware = HistoryTrimMiddleware(max_messages=2)
+        current_input = [
+            {"type": "function_call_output", "call_id": "1", "output": "a"},
+            {"type": "function_call_output", "call_id": "2", "output": "b"},
+            {"type": "function_call_output", "call_id": "3", "output": "c"},
+        ]
+
+        context = {"current_input": current_input}
+        result = middleware.before_llm(context)
+
+        assert result["current_input"] == current_input
 
 
 class TestInputGuardMiddleware:

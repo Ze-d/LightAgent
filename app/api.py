@@ -21,7 +21,7 @@ from app.obj.types import ChatMessage
 from app.core.runner import AgentRunner
 from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.core.event_channel import EventChannel
-from app.core.checkpoint import CheckpointManager, Checkpoint
+from app.core.checkpoint import CheckpointManager
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
@@ -37,6 +37,19 @@ async def lifespan(app: FastAPI):
             "Please copy .env.example to .env and fill in your API key."
         )
     logger.info(f"Starting with model={LLM_MODEL_ID}, max_steps={MAX_STEPS}")
+
+    mcp_configs = load_mcp_config()
+    if mcp_configs:
+        for config in mcp_configs:
+            await mcp_registry.register_mcp_server(
+                name=config.name,
+                command=config.command,
+                env=config.env,
+                transport=config.transport,
+                server_url=config.server_url,
+                extra_env=config.extra_env,
+            )
+
     yield
 
 
@@ -56,18 +69,7 @@ tool_registry = build_default_registry()
 skill_registry = build_default_skills()
 skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)
 runner.skill_dispatcher = skill_dispatcher
-
-mcp_configs = load_mcp_config()
-if mcp_configs:
-    mcp_registry = MCPToolRegistry(tool_registry)
-    for config in mcp_configs:
-        mcp_registry.register_mcp_server(
-            name=config.name,
-            command=config.command,
-            env=config.env,
-            transport=config.transport,
-            server_url=config.server_url,
-        )
+mcp_registry = MCPToolRegistry(tool_registry)
 
 
 
@@ -98,7 +100,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 detail=f"Session not found: {session_id}"
             )
 
-    # 2. 创建ToolAwareAgent并检查checkpoint恢复
+    # 2. 创建ToolAwareAgent并丢弃上一轮未完成的checkpoint
     agent = ToolAwareAgent(
         name="chat-agent",
         model=LLM_MODEL_ID,
@@ -106,9 +108,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     )
     checkpoint = checkpoint_manager.load(session_id)
     if checkpoint:
-        logger.info(f"Restoring from checkpoint: session_id={session_id}, step={checkpoint.step}")
-        history = checkpoint.history
-        agent.restore_state(checkpoint.agent_state)
+        logger.warning(
+            f"Discarding stale checkpoint before new user turn: "
+            f"session_id={session_id}, step={checkpoint.step}"
+        )
+        checkpoint_manager.clear(session_id)
 
     # 3. 追加用户消息
     history.append({
@@ -180,7 +184,7 @@ async def chat_stream(req: ChatRequest):
             return
         history = loaded_history
 
-    # 2. 创建ToolAwareAgent并检查checkpoint恢复
+    # 2. 创建ToolAwareAgent并丢弃上一轮未完成的checkpoint
     agent = ToolAwareAgent(
         name="chat-agent",
         model=LLM_MODEL_ID,
@@ -188,9 +192,11 @@ async def chat_stream(req: ChatRequest):
     )
     checkpoint = checkpoint_manager.load(session_id)
     if checkpoint:
-        logger.info(f"Restoring from checkpoint: session_id={session_id}, step={checkpoint.step}")
-        history = checkpoint.history
-        agent.restore_state(checkpoint.agent_state)
+        logger.warning(
+            f"Discarding stale checkpoint before new user turn: "
+            f"session_id={session_id}, step={checkpoint.step}"
+        )
+        checkpoint_manager.clear(session_id)
 
     # 3. 追加用户消息
     history.append({

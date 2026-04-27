@@ -1,5 +1,4 @@
 """Memory summarization module for semantic compression of message history."""
-import json
 from typing import Any
 
 
@@ -22,12 +21,14 @@ class MessageSummarizer:
             system_msg = messages[0]
             non_system = messages[1:]
 
-        if len(non_system) <= self.target_messages - (1 if system_msg else 0):
+        available_slots = self.target_messages - (1 if system_msg else 0)
+        if len(non_system) <= available_slots:
             return messages
 
-        preserved_count = self.target_messages - (1 if system_msg else 0)
-        recent = non_system[-preserved_count:]
-        summary = self._create_summary(non_system[:-preserved_count]) if len(non_system) > preserved_count else []
+        preserved_count = max(available_slots - 1, 0)
+        recent = non_system[-preserved_count:] if preserved_count else []
+        old_messages = non_system[:-preserved_count] if preserved_count else non_system
+        summary = self._create_summary(old_messages)
 
         result = []
         if system_msg:
@@ -64,12 +65,17 @@ class MessageSummarizer:
             system_msg = messages[0]
             non_system = messages[1:]
 
-        if len(non_system) <= self.target_messages - (1 if system_msg else 0):
+        available_slots = self.target_messages - (1 if system_msg else 0)
+        if len(non_system) <= available_slots:
             return messages
+
+        preserved_count = max(available_slots - 1, 0)
+        recent = non_system[-preserved_count:] if preserved_count else []
+        old_messages = non_system[:-preserved_count] if preserved_count else non_system
 
         conversation = "\n".join(
             f"{m.get('role', 'unknown')}: {m.get('content', '')}"
-            for m in non_system
+            for m in old_messages
         )
 
         prompt = f"""请用简洁的语言总结以下对话的主要内容和关键信息，以便后续上下文可以基于此继续。
@@ -84,12 +90,9 @@ class MessageSummarizer:
                 model=model,
                 input=[{"role": "user", "content": prompt}],
             )
-            summary_text = response.output_text or self._create_summary(non_system)
+            summary_text = response.output_text or self._create_summary(old_messages)
         except Exception:
-            summary_text = self._create_summary(non_system)
-
-        preserved_count = self.target_messages - (1 if system_msg else 0)
-        recent = non_system[-preserved_count:]
+            summary_text = self._create_summary(old_messages)
 
         result = []
         if system_msg:

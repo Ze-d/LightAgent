@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from typing import Any
 
@@ -21,11 +22,13 @@ class MCPClient:
         transport: str = "stdio",
         server_url: str | None = None,
         timeout: float = 30.0,
+        extra_env: dict[str, str] | None = None,
     ):
         self.name = name
         self.command = command or []
         self.env = env or {}
         self.timeout = timeout
+        self.extra_env = extra_env or {}
         self._transport: BaseTransport | None = None
         self._initialized = False
         self._protocol_version = "2024-11-05"
@@ -37,18 +40,20 @@ class MCPClient:
         elif transport == "sse":
             if not server_url:
                 raise ValueError("server_url required for SSE transport")
-            self._transport = SSETransport(server_url)
+            self._transport = SSETransport(server_url, headers=self.extra_env)
         else:
             raise ValueError(f"Unknown transport: {transport}")
 
-    def start(self) -> None:
+    async def start(self) -> None:
         if self._transport is None:
             raise MCPConnectionError("Transport not initialized")
-        self._transport.connect()
-        self._send_initialize()
+        connect_result = self._transport.connect()
+        if inspect.isawaitable(connect_result):
+            await connect_result
+        await self._send_initialize()
         self._initialized = True
 
-    def _send_initialize(self) -> dict[str, Any]:
+    async def _send_initialize(self) -> dict[str, Any]:
         request = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -62,11 +67,11 @@ class MCPClient:
                 },
             },
         }
-        return self._send_request(request)
+        return await self._send_request(request)
 
-    def list_tools(self) -> list[dict[str, Any]]:
+    async def list_tools(self) -> list[dict[str, Any]]:
         if not self._initialized:
-            self.start()
+            await self.start()
 
         request = {
             "jsonrpc": "2.0",
@@ -74,12 +79,12 @@ class MCPClient:
             "method": "tools/list",
             "params": {},
         }
-        response = self._send_request(request)
+        response = await self._send_request(request)
         return response.get("result", {}).get("tools", [])
 
-    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         if not self._initialized:
-            self.start()
+            await self.start()
 
         request = {
             "jsonrpc": "2.0",
@@ -92,7 +97,7 @@ class MCPClient:
         }
 
         try:
-            response = self._send_request(request, timeout=self.timeout)
+            response = await self._send_request(request, timeout=self.timeout)
             result = response.get("result", {})
 
             content = result.get("content", [])
@@ -104,21 +109,13 @@ class MCPClient:
         except asyncio.TimeoutError:
             raise MCPTimeoutError(f"Tool '{tool_name}' timed out after {self.timeout}s")
 
-    def _send_request(self, request: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+    async def _send_request(self, request: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
         if self._transport is None:
             raise MCPConnectionError("Transport not initialized")
 
         timeout = timeout or self.timeout
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        return loop.run_until_complete(
-            self._transport.send_request(request, timeout)
-        )
+        return await self._transport.send_request(request, timeout)
 
     def stop(self) -> None:
         if self._transport:
