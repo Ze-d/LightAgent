@@ -1,11 +1,15 @@
 """Verification tests for new features: async tools, memory summarizer, and input guard."""
 import pytest
 import asyncio
+from uuid import uuid4
 from app.core.tool_registry import ToolRegistry
+from app.memory.document_store import DocumentMemoryStore
 from app.memory.summarizer import MessageSummarizer
 from app.middleware.history_trim_middleware import HistoryTrimMiddleware
 from app.security.input_guard import InputGuardMiddleware
 from app.core.middleware import MiddlewareAbort
+from app.tools import memory_tools
+from app.tools.register import build_default_registry
 
 
 class TestAsyncToolSupport:
@@ -105,6 +109,47 @@ class TestHistoryTrimMiddleware:
         result = middleware.before_llm(context)
 
         assert result["current_input"] == current_input
+
+
+class TestDocumentMemoryStore:
+    def _store(self) -> DocumentMemoryStore:
+        return DocumentMemoryStore(".memory/test-runtime")
+
+    def test_comment_only_defaults_do_not_enter_context(self):
+        store = self._store()
+        session_id = f"test-{uuid4()}"
+
+        assert store.build_context(session_id=session_id) == ""
+
+    def test_builds_context_from_project_user_and_session_memory(self):
+        store = self._store()
+        session_id = f"test-{uuid4()}"
+        store.append_session_summary(session_id, "- User asked about memory.")
+
+        context = store.build_context(session_id=session_id)
+
+        assert "[Session Memory]" in context
+        assert "User asked about memory." in context
+
+    def test_memory_tools_use_document_store(self, monkeypatch):
+        store = self._store()
+        session_id = f"test-{uuid4()}"
+        monkeypatch.setattr(memory_tools, "_memory_store", store)
+
+        registry = build_default_registry()
+        append_result = registry.call(
+            "memory_append_session_summary",
+            session_id=session_id,
+            summary="- Remember this session.",
+        )
+        read_result = registry.call(
+            "memory_read",
+            scope="session",
+            session_id=session_id,
+        )
+
+        assert append_result == "Session memory appended."
+        assert "Remember this session." in read_result
 
 
 class TestInputGuardMiddleware:

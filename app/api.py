@@ -25,8 +25,12 @@ from app.core.checkpoint import CheckpointManager
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
+from app.memory.document_store import DocumentMemoryStore
 from app.mcp.config import load_mcp_config
 from app.mcp.tool_registry import MCPToolRegistry
+
+
+MEMORY_CONTEXT_PREFIX = "[Memory]\n"
 
 
 @asynccontextmanager
@@ -65,6 +69,7 @@ client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT 
 runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=composite_hooks, middleware=composite_middleware)
 session_manager : BaseSessionManager = InMemorySessionManager()
 checkpoint_manager = CheckpointManager()
+memory_store = DocumentMemoryStore()
 tool_registry = build_default_registry()
 skill_registry = build_default_skills()
 skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)
@@ -79,6 +84,42 @@ mcp_registry = MCPToolRegistry(tool_registry)
 @app.get("/")
 async def root():
     return {"message": "Minimal Agent API is running"}
+
+
+def _strip_memory_messages(history: list[ChatMessage]) -> list[ChatMessage]:
+    return [
+        message for message in history
+        if not (
+            message.get("role") == "system"
+            and message.get("content", "").startswith(MEMORY_CONTEXT_PREFIX)
+        )
+    ]
+
+
+def _build_runner_history(history: list[ChatMessage], session_id: str) -> list[ChatMessage]:
+    clean_history = _strip_memory_messages(history)
+    memory_context = memory_store.build_context(session_id=session_id)
+    if not memory_context:
+        return list(clean_history)
+
+    memory_message: ChatMessage = {
+        "role": "system",
+        "content": f"{MEMORY_CONTEXT_PREFIX}{memory_context}",
+    }
+    if clean_history and clean_history[0].get("role") == "system":
+        return [clean_history[0], memory_message, *clean_history[1:]]
+    return [memory_message, *clean_history]
+
+
+def _record_session_memory(session_id: str, user_message: str, assistant_message: str) -> None:
+    try:
+        memory_store.append_session_exchange(
+            session_id=session_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to write session memory: session_id={session_id}, error={e}")
 
 
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
@@ -99,6 +140,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session not found: {session_id}"
             )
+        history = _strip_memory_messages(history)
 
     # 2. 创建ToolAwareAgent并丢弃上一轮未完成的checkpoint
     agent = ToolAwareAgent(
@@ -120,12 +162,13 @@ def chat(req: ChatRequest) -> ChatResponse:
         "content": req.message,
     })
     session_manager.save(session_id, history)
+    runner_history = _build_runner_history(history, session_id)
 
     # 4. 调用 Agent
     try:
         run_result = runner.run(
             agent=agent,
-            history=history,
+            history=runner_history,
             tool_registry=tool_registry,
             session_id=session_id,
             checkpoint_manager=checkpoint_manager,
@@ -146,6 +189,7 @@ def chat(req: ChatRequest) -> ChatResponse:
 
     # 5. 回写会话
     session_manager.save(session_id, history)
+    _record_session_memory(session_id, req.message, answer)
 
     return ChatResponse(
         session_id=session_id,
@@ -182,7 +226,7 @@ async def chat_stream(req: ChatRequest):
             })
             await channel.close()
             return
-        history = loaded_history
+        history = _strip_memory_messages(loaded_history)
 
     # 2. 创建ToolAwareAgent并丢弃上一轮未完成的checkpoint
     agent = ToolAwareAgent(
@@ -203,6 +247,8 @@ async def chat_stream(req: ChatRequest):
         "role": "user",
         "content": req.message,
     })
+    session_manager.save(session_id, history)
+    runner_history = _build_runner_history(history, session_id)
 
     # 4. 在后台跑 runner，过程中事件会持续进入 channel
     async def run_agent():
@@ -213,7 +259,7 @@ async def chat_stream(req: ChatRequest):
                 None,  # use default thread pool
                 lambda: runner.run(
                     agent=agent,
-                    history=history,
+                    history=runner_history,
                     tool_registry=tool_registry,
                     hooks=run_hooks,
                     session_id=session_id,
@@ -226,6 +272,7 @@ async def chat_stream(req: ChatRequest):
                 "content": answer,
             })
             session_manager.save(session_id, history)
+            _record_session_memory(session_id, req.message, answer)
 
             await channel.publish({
                 "event": "final_answer",

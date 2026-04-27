@@ -7,6 +7,8 @@ def test_registry_contains_default_tools():
 
     assert "calculator" in names
     assert "get_current_time" in names
+    assert "memory_read" in names
+    assert "memory_append_session_summary" in names
 
 
 def test_registry_generates_openai_tools():
@@ -16,6 +18,8 @@ def test_registry_generates_openai_tools():
     names = [tool["name"] for tool in tools]
     assert "calculator" in names
     assert "get_current_time" in names
+    assert "memory_read" in names
+    assert "memory_append_session_summary" in names
 
     for tool in tools:
         assert tool["type"] == "function"
