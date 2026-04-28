@@ -1,4 +1,6 @@
 """Unit tests for tool call success rate."""
+import json
+
 import pytest
 
 from app.tools.register import build_default_registry
@@ -126,6 +128,70 @@ class TestGetCurrentTimeToolSuccessRate:
         assert success_rate == 1.0
 
 
+class TestExtendedToolSuccessRate:
+    """Test deterministic built-in tools across several domains."""
+
+    @pytest.fixture
+    def registry(self):
+        return build_default_registry()
+
+    def test_convert_units_success_cases(self, registry):
+        test_cases = [
+            ({"value": 2.5, "from_unit": "kilometer", "to_unit": "meter"}, "2500"),
+            ({"value": 100, "from_unit": "centimeter", "to_unit": "meter"}, "1"),
+            ({"value": 32, "from_unit": "fahrenheit", "to_unit": "celsius"}, "0"),
+            ({"value": 1, "from_unit": "kilogram", "to_unit": "gram"}, "1000"),
+        ]
+
+        success_count = 0
+        for args, expected in test_cases:
+            result = registry.call("convert_units", **args)
+            if result == expected:
+                success_count += 1
+
+        success_rate = success_count / len(test_cases)
+        assert success_rate == 1.0
+
+    def test_analyze_text_counts(self, registry):
+        result = registry.call("analyze_text", text="hello world\nsecond line")
+        parsed = json.loads(result)
+
+        assert parsed["words"] == 4
+        assert parsed["lines"] == 2
+        assert parsed["characters"] == len("hello world\nsecond line")
+
+    def test_get_weather_supported_city(self, registry):
+        result = registry.call("get_weather", city="beijing")
+        parsed = json.loads(result)
+
+        assert parsed["city"] == "beijing"
+        assert "condition" in parsed
+        assert "temperature_c" in parsed
+
+    def test_search_knowledge_finds_relevant_record(self, registry):
+        result = registry.call("search_knowledge", query="checkpoint middleware tool calls")
+        parsed = json.loads(result)
+
+        assert parsed
+        assert any(item["title"] == "AgentRunner" for item in parsed)
+
+    def test_extended_tools_error_handling(self, registry):
+        test_cases = [
+            ("convert_units", {"value": 1, "from_unit": "meter", "to_unit": "second"}, "Unsupported"),
+            ("get_weather", {"city": "unknown_city"}, "Unknown city"),
+            ("search_knowledge", {"query": ""}, "[]"),
+        ]
+
+        success_count = 0
+        for tool_name, args, expected_fragment in test_cases:
+            result = registry.call(tool_name, **args)
+            if expected_fragment in result:
+                success_count += 1
+
+        success_rate = success_count / len(test_cases)
+        assert success_rate == 1.0
+
+
 class TestToolSuccessRateSummary:
     """Summary of tool call success rate metrics."""
 
@@ -144,6 +210,12 @@ class TestToolSuccessRateSummary:
             ("get_current_time", {"city": "shanghai"}, True),
             ("get_current_time", {"city": "tokyo"}, True),
             ("get_current_time", {"city": "invalid_city"}, False),
+            ("convert_units", {"value": 2, "from_unit": "km", "to_unit": "m"}, True),
+            ("convert_units", {"value": 2, "from_unit": "km", "to_unit": "second"}, False),
+            ("analyze_text", {"text": "hello world"}, True),
+            ("get_weather", {"city": "beijing"}, True),
+            ("get_weather", {"city": "invalid_city"}, False),
+            ("search_knowledge", {"query": "ToolRegistry schema"}, True),
         ]
 
         total_calls = len(test_scenarios)
@@ -155,7 +227,11 @@ class TestToolSuccessRateSummary:
                 if "error" not in result.lower() and "Unknown city" not in result:
                     successful_calls += 1
             else:
-                if "error" in result.lower() or "Unknown city" in result:
+                if (
+                    "error" in result.lower()
+                    or "Unknown city" in result
+                    or "Unsupported" in result
+                ):
                     successful_calls += 1
 
         success_rate = successful_calls / total_calls

@@ -12,17 +12,20 @@ _memory_store = DocumentMemoryStore()
 class MemoryReadInput(BaseModel):
     scope: Literal["project", "user", "session", "all"] = Field(
         ...,
-        description="Memory scope to read.",
+        description="Existing memory scope to read. This does not save or modify memory.",
     )
     session_id: Optional[str] = Field(
         default=None,
-        description="Required when scope is 'session'; optional for 'all'.",
+        description="Required when reading session memory; optional for reading all memory.",
     )
 
 
 class MemoryAppendSessionSummaryInput(BaseModel):
-    session_id: str = Field(..., description="Session ID to append memory to.")
-    summary: str = Field(..., description="Concise memory summary to append.")
+    session_id: str = Field(..., description="Session ID where the new memory should be stored.")
+    summary: str = Field(
+        ...,
+        description="New fact, preference, decision, or concise session note to remember.",
+    )
 
 
 def memory_read(scope: str, session_id: str | None = None) -> str:
