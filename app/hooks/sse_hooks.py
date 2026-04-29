@@ -1,8 +1,9 @@
 import asyncio
 from typing import Any
-from app.core.hooks import BaseRunnerHooks
+
 from app.core.event_channel import EventChannel
-from app.obj.types import RunEndEvent, RunStartEvent, ToolCallEvent
+from app.core.hooks import BaseRunnerHooks
+from app.obj.types import RunEndEvent, ToolCallEvent
 
 
 class SSEHooks(BaseRunnerHooks):
@@ -13,7 +14,7 @@ class SSEHooks(BaseRunnerHooks):
     def _publish(self, event: dict[str, Any]) -> None:
         asyncio.run_coroutine_threadsafe(self.channel.publish(event), self.loop)
 
-    def on_tool_start(self, event: RunStartEvent):
+    def on_tool_start(self, event: ToolCallEvent):
         self._publish({
             "event": "tool_start",
             "data": event,
