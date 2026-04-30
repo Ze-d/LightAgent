@@ -1,8 +1,8 @@
 import pytest
+import sys
 from app.mcp.transport.base import BaseTransport
 from app.mcp.transport.stdio import StdioTransport
 from app.mcp.transport.sse import SSETransport
-from app.mcp.errors import MCPConnectionError
 
 
 class TestStdioTransport:
@@ -13,14 +13,20 @@ class TestStdioTransport:
         transport.close()
 
     def test_connect_creates_process(self):
-        transport = StdioTransport(command=["echo", "test"], env=None)
+        transport = StdioTransport(
+            command=[sys.executable, "-c", "import time; time.sleep(60)"],
+            env=None,
+        )
         transport.connect()
         assert transport._process is not None
         assert transport._process.poll() is None
         transport.close()
 
     def test_close_terminates_process(self):
-        transport = StdioTransport(command=["sleep", "10"], env=None)
+        transport = StdioTransport(
+            command=[sys.executable, "-c", "import time; time.sleep(60)"],
+            env=None,
+        )
         transport.connect()
         transport.close()
         assert transport._process is None

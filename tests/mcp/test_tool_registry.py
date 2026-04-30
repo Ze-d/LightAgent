@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from unittest.mock import MagicMock, patch
 from app.mcp.tool_registry import MCPToolRegistry
@@ -47,10 +48,12 @@ class TestMCPToolRegistryWithMockClient:
         inner = ToolRegistry()
         registry = MCPToolRegistry(inner)
 
-        registry.register_mcp_server(
-            name="zotero",
-            command=["npx", "mcp-zotero"],
-            transport="stdio",
+        asyncio.run(
+            registry.register_mcp_server(
+                name="zotero",
+                command=["npx", "mcp-zotero"],
+                transport="stdio",
+            )
         )
 
         mock_client.start.assert_called_once()
@@ -74,7 +77,7 @@ class TestMCPToolRegistryWithMockClient:
         inner = ToolRegistry()
         registry = MCPToolRegistry(inner)
 
-        registry.register_mcp_server(name="zotero", transport="stdio")
+        asyncio.run(registry.register_mcp_server(name="zotero", transport="stdio"))
 
         result = registry.call("zotero:search_library", query="test")
         assert result == "Found 5 items"

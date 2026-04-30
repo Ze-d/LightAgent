@@ -41,6 +41,7 @@ env/
 htmlcov/
 .tox/
 tmp*/
+.test-runtime/
 
 # Environment variables / secrets
 .env

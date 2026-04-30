@@ -1,6 +1,7 @@
 """Verification tests for new features: async tools, memory summarizer, and input guard."""
 import pytest
 import asyncio
+from pathlib import Path
 from uuid import uuid4
 from app.core.tool_registry import ToolRegistry
 from app.memory.document_store import DocumentMemoryStore
@@ -113,7 +114,7 @@ class TestHistoryTrimMiddleware:
 
 class TestDocumentMemoryStore:
     def _store(self) -> DocumentMemoryStore:
-        return DocumentMemoryStore(".memory/test-runtime")
+        return DocumentMemoryStore(Path(".test-runtime") / "memory" / str(uuid4()))
 
     def test_comment_only_defaults_do_not_enter_context(self):
         store = self._store()
