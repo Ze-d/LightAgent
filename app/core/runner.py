@@ -1,6 +1,7 @@
 import json
 import asyncio
 import time
+from typing import Any
 
 from openai import OpenAI
 
@@ -107,6 +108,337 @@ class AgentRunner:
         self._emit_run_end(hooks, agent, result, started_at, session_id)
         return result
 
+    def _build_result(
+        self,
+        answer: str,
+        success: bool,
+        steps: int,
+        tool_events: list[ToolCallEvent],
+        error: str | None,
+    ) -> AgentRunResult:
+        return {
+            "answer": answer,
+            "success": success,
+            "steps": steps,
+            "tool_events": tool_events,
+            "error": error,
+        }
+
+    def _resolve_tools(
+        self,
+        agent: BaseAgent,
+        tool_registry: ToolRegistry | None,
+    ) -> list[dict[str, Any]]:
+        if tool_registry and agent.supports_tools():
+            return tool_registry.get_openai_tools()
+        return []
+
+    def _start_run_span(
+        self,
+        tracer: Any,
+        agent: BaseAgent,
+    ) -> AgentSpan | None:
+        span = AgentSpan(tracer) if tracer else None
+        if span:
+            span.start_run_span(agent.name, agent.model, self.max_steps)
+        return span
+
+    def _try_invoke_skill(
+        self,
+        agent: BaseAgent,
+        history: list[ChatMessage],
+    ) -> tuple[bool, Any]:
+        if not self.skill_dispatcher or not history:
+            return False, None
+
+        last_msg = history[-1]
+        if not isinstance(last_msg, dict) or last_msg.get("role") != "user":
+            return False, None
+
+        raw_input = last_msg.get("content", "")
+        return self.skill_dispatcher.try_invoke(raw_input, agent.name)
+
+    def _apply_llm_middleware(
+        self,
+        agent: BaseAgent,
+        current_input: list[dict] | str,
+        step: int,
+    ) -> list[dict] | str:
+        llm_context: dict = {
+            "agent_name": agent.name,
+            "model": agent.model,
+            "step": step,
+            "current_input": current_input,
+        }
+        if self.middleware:
+            llm_context = self.middleware.before_llm(llm_context)
+        return llm_context["current_input"]
+
+    def _call_llm_with_resilience(
+        self,
+        agent: BaseAgent,
+        current_input: list[dict] | str,
+        tools: list[dict[str, Any]],
+        step: int,
+        session_id: str | None,
+        span: AgentSpan | None,
+    ) -> Any:
+        if self.rate_limiter:
+            self.rate_limiter.acquire(timeout=5.0)
+
+        if (
+            self.llm_circuit_breaker
+            and self.llm_circuit_breaker.state == CircuitBreaker.OPEN
+        ):
+            raise CircuitBreakerOpenError("LLM circuit breaker is open")
+
+        def llm_call():
+            return self.client.responses.create(
+                model=agent.model,
+                input=current_input,
+                tools=tools if tools else None,
+            )
+
+        try:
+            response = with_timeout(llm_call, self.llm_timeout)
+        except ToolTimeoutError:
+            logger.warning(
+                "runner event=llm_error agent=%s session_id=%s step=%s "
+                "error_type=%s timeout_seconds=%s",
+                agent.name,
+                session_id or "",
+                step,
+                "TimeoutError",
+                self.llm_timeout,
+            )
+            if span:
+                span.end_current_span(
+                    error=ToolTimeoutError(
+                        f"LLM call exceeded {self.llm_timeout}s"
+                    )
+                )
+            if self.llm_circuit_breaker:
+                self.llm_circuit_breaker.record_failure()
+            if self.max_retries > 1:
+                from tenacity import retry, stop_after_attempt, wait_exponential
+
+                retry_decorator = retry(
+                    stop=stop_after_attempt(self.max_retries),
+                    wait=wait_exponential(multiplier=1, min=1, max=10),
+                    reraise=True,
+                )
+                response = retry_decorator(llm_call)()
+            else:
+                raise
+        except RateLimitError as e:
+            logger.warning(
+                "runner event=llm_error agent=%s session_id=%s step=%s "
+                "error_type=%s",
+                agent.name,
+                session_id or "",
+                step,
+                type(e).__name__,
+            )
+            if span:
+                span.end_current_span(error=e)
+            if self.llm_circuit_breaker:
+                self.llm_circuit_breaker.record_failure()
+            raise
+        except Exception as e:
+            logger.exception(
+                "runner event=llm_error agent=%s session_id=%s step=%s "
+                "error_type=%s",
+                agent.name,
+                session_id or "",
+                step,
+                type(e).__name__,
+            )
+            if self.llm_circuit_breaker:
+                self.llm_circuit_breaker.record_failure()
+            raise
+
+        if self.llm_circuit_breaker:
+            self.llm_circuit_breaker.record_success()
+
+        if span:
+            span.end_current_span()
+
+        return response
+
+    def _get_tool_circuit_breaker(self, tool_name: str) -> CircuitBreaker:
+        cb = self._circuit_breakers.get(tool_name)
+        if cb is None:
+            cb = CircuitBreaker(name=tool_name)
+            self._circuit_breakers[tool_name] = cb
+        return cb
+
+    def _execute_tool_call(
+        self,
+        agent: BaseAgent,
+        tool_registry: ToolRegistry,
+        hooks: BaseRunnerHooks | None,
+        span: AgentSpan | None,
+        collected_events: list[ToolCallEvent],
+        step: int,
+        fc: Any,
+    ) -> FunctionCallOutput:
+        tool_name = fc.name
+        call_id = fc.call_id
+        try:
+            preview_args = json.loads(fc.arguments)
+        except json.JSONDecodeError:
+            preview_args = {}
+
+        if span:
+            span.start_tool_span(tool_name, preview_args)
+
+        # Start events are observer-only; final tool_events keep their
+        # historical success/error-only shape.
+        if hooks:
+            hooks.on_tool_start({
+                "agent_name": agent.name,
+                "step": step,
+                "tool_name": tool_name,
+                "arguments": preview_args,
+                "status": "start",
+            })
+
+        try:
+            tool_args = json.loads(fc.arguments)
+            tool_context: dict = {
+                "agent_name": agent.name,
+                "step": step,
+                "tool_name": tool_name,
+                "arguments": tool_args,
+            }
+
+            try:
+                if self.middleware:
+                    self.middleware.before_tool(tool_context)
+            except MiddlewareAbort as e:
+                if span:
+                    span.end_current_span()
+                error_event: ToolCallEvent = {
+                    "agent_name": agent.name,
+                    "step": step,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "error",
+                    "error": e.message,
+                }
+                collected_events.append(error_event)
+                if hooks:
+                    hooks.on_tool_end(error_event)
+                agent.on_tool_event(error_event)
+                result = e.message
+        except json.JSONDecodeError:
+            if span:
+                span.end_current_span()
+            result = "工具参数解析失败。"
+        else:
+            cb = self._get_tool_circuit_breaker(tool_name)
+
+            def tool_call() -> str:
+                if tool_registry.is_async(tool_name):
+                    return asyncio.run(
+                        tool_registry.call_async(tool_name, **tool_args)
+                    )
+                return tool_registry.call(tool_name, **tool_args)
+
+            try:
+                if cb.state == CircuitBreaker.OPEN:
+                    raise CircuitBreakerOpenError(
+                        f"Circuit breaker open for tool: {tool_name}"
+                    )
+                result = cb.call(with_timeout, tool_call, 10.0)
+            except CircuitBreakerOpenError as e:
+                if span:
+                    span.end_current_span(error=e)
+                result = f"工具暂时不可用（熔断器打开）：{e}"
+                tool_event: ToolCallEvent = {
+                    "agent_name": agent.name,
+                    "step": step,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "error",
+                    "error": str(e),
+                }
+                collected_events.append(tool_event)
+                agent.on_tool_event(tool_event)
+                if hooks:
+                    hooks.on_tool_end(tool_event)
+            except ToolTimeoutError:
+                cb.record_failure()
+                if span:
+                    span.end_current_span(error=ToolTimeoutError("Tool call timed out"))
+                result = f"工具执行超时（10s）：{tool_name}"
+                tool_event = {
+                    "agent_name": agent.name,
+                    "step": step,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "error",
+                    "error": result,
+                }
+                collected_events.append(tool_event)
+                agent.on_tool_event(tool_event)
+                if hooks:
+                    hooks.on_tool_end(tool_event)
+            except Exception as e:
+                cb.record_failure()
+                if span:
+                    span.end_current_span(error=e)
+                result = f"工具执行失败：{e}"
+                tool_event = {
+                    "agent_name": agent.name,
+                    "step": step,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "error",
+                    "error": str(e),
+                }
+                collected_events.append(tool_event)
+                agent.on_tool_event(tool_event)
+                if hooks:
+                    hooks.on_tool_end(tool_event)
+            else:
+                if span:
+                    span.end_current_span()
+                tool_event = {
+                    "agent_name": agent.name,
+                    "step": step,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "success",
+                    "result": result,
+                }
+                collected_events.append(tool_event)
+                agent.on_tool_event(tool_event)
+                if hooks:
+                    hooks.on_tool_end(tool_event)
+
+        return {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": result,
+        }
+
+    def _save_checkpoint(
+        self,
+        checkpoint_manager: CheckpointManager | None,
+        session_id: str | None,
+        step: int,
+        current_input: list[FunctionCallOutput],
+        agent: BaseAgent,
+    ) -> None:
+        if checkpoint_manager and session_id:
+            checkpoint_manager.save(
+                session_id=session_id,
+                step=step,
+                history=list(current_input),
+                agent_state=agent.get_state(),
+            )
+
     def run(
         self,
         agent: BaseAgent,
@@ -129,13 +461,9 @@ class AgentRunner:
         if effective_hooks:
             effective_hooks.on_run_start(start_event)
 
-        current_input = history
+        current_input: list[dict] | str = history
         collected_events: list[ToolCallEvent] = []
-        tools = (
-            tool_registry.get_openai_tools()
-            if (tool_registry and agent.supports_tools())
-            else []
-        )
+        tools = self._resolve_tools(agent, tool_registry)
         logger.info(
             "runner event=run_start agent=%s session_id=%s model=%s "
             "history_length=%s max_steps=%s tools_count=%s",
@@ -146,34 +474,26 @@ class AgentRunner:
             self.max_steps,
             len(tools),
         )
-        # todo：这里为什么span没有在hooks里调用？因为hooks是用户自定义的，可能不想要span，所以放在runner里更合适
-        span = AgentSpan(tracer) if tracer else None
-        if span:
-            span.start_run_span(agent.name, agent.model, self.max_steps)
+        span = self._start_run_span(tracer, agent)
 
-        # Check for slash command before LLM call
-        if self.skill_dispatcher and history:
-            last_msg = history[-1]
-            if isinstance(last_msg, dict) and last_msg.get("role") == "user":
-                raw_input = last_msg.get("content", "")
-                invoked, result = self.skill_dispatcher.try_invoke(raw_input, agent.name)
-                if invoked:
-                    if span:
-                        span.end_all()
-                    self._clear_checkpoint(checkpoint_manager, session_id)
-                    return self._finish_run(
-                        effective_hooks,
-                        agent,
-                        {
-                            "answer": result,
-                            "success": True,
-                            "steps": 0,
-                            "tool_events": [],
-                            "error": None,
-                        },
-                        run_started_at,
-                        session_id,
-                    )
+        invoked, skill_result = self._try_invoke_skill(agent, history)
+        if invoked:
+            if span:
+                span.end_all()
+            self._clear_checkpoint(checkpoint_manager, session_id)
+            return self._finish_run(
+                effective_hooks,
+                agent,
+                self._build_result(
+                    answer=skill_result,
+                    success=True,
+                    steps=0,
+                    tool_events=[],
+                    error=None,
+                ),
+                run_started_at,
+                session_id,
+            )
 
         try:
             for step in range(1, self.max_steps + 1):
@@ -197,15 +517,12 @@ class AgentRunner:
                         "input_length": len(current_input),
                     })
 
-                llm_context: dict = {
-                    "agent_name": agent.name,
-                    "model": agent.model,
-                    "step": step,
-                    "current_input": current_input,
-                }
                 try:
-                    if self.middleware:
-                        llm_context = self.middleware.before_llm(llm_context)
+                    current_input = self._apply_llm_middleware(
+                        agent,
+                        current_input,
+                        step,
+                    )
                 except MiddlewareAbort as e:
                     if span:
                         span.end_current_span()
@@ -214,25 +531,30 @@ class AgentRunner:
                     return self._finish_run(
                         effective_hooks,
                         agent,
-                        {
-                            "answer": e.message,
-                            "success": False,
-                            "steps": step,
-                            "tool_events": collected_events,
-                            "error": "middleware_abort_before_llm",
-                        },
+                        self._build_result(
+                            answer=e.message,
+                            success=False,
+                            steps=step,
+                            tool_events=collected_events,
+                            error="middleware_abort_before_llm",
+                        ),
                         run_started_at,
                         session_id,
                     )
-                current_input = llm_context["current_input"]
 
                 if span:
                     span.start_llm_span(len(current_input))
 
-                if self.rate_limiter:
-                    self.rate_limiter.acquire(timeout=5.0)
-
-                if self.llm_circuit_breaker and self.llm_circuit_breaker.state == CircuitBreaker.OPEN:
+                try:
+                    response = self._call_llm_with_resilience(
+                        agent=agent,
+                        current_input=current_input,
+                        tools=tools,
+                        step=step,
+                        session_id=session_id,
+                        span=span,
+                    )
+                except CircuitBreakerOpenError:
                     if span:
                         span.end_current_span()
                         span.end_all()
@@ -240,112 +562,50 @@ class AgentRunner:
                     return self._finish_run(
                         effective_hooks,
                         agent,
-                        {
-                            "answer": "LLM 服务暂时不可用（熔断器打开），请稍后重试。",
-                            "success": False,
-                            "steps": step,
-                            "tool_events": collected_events,
-                            "error": "llm_circuit_breaker_open",
-                        },
+                        self._build_result(
+                            answer="LLM 服务暂时不可用（熔断器打开），请稍后重试。",
+                            success=False,
+                            steps=step,
+                            tool_events=collected_events,
+                            error="llm_circuit_breaker_open",
+                        ),
                         run_started_at,
                         session_id,
                     )
-
-                def llm_call():
-                    return self.client.responses.create(
-                        model=agent.model,
-                        input=current_input,
-                        tools=tools if tools else None,
-                    )
-
-                try:
-                    response = with_timeout(llm_call, self.llm_timeout)
                 except ToolTimeoutError:
-                    logger.warning(
-                        "runner event=llm_error agent=%s session_id=%s step=%s "
-                        "error_type=%s timeout_seconds=%s",
-                        agent.name,
-                        session_id or "",
-                        step,
-                        "TimeoutError",
-                        self.llm_timeout,
-                    )
-                    if span:
-                        span.end_current_span(error=ToolTimeoutError(f"LLM call exceeded {self.llm_timeout}s"))
-                    if self.llm_circuit_breaker:
-                        self.llm_circuit_breaker.record_failure()
-                    if self.max_retries > 1:
-                        from tenacity import retry, stop_after_attempt, wait_exponential
-                        retry_decorator = retry(
-                            stop=stop_after_attempt(self.max_retries),
-                            wait=wait_exponential(multiplier=1, min=1, max=10),
-                            reraise=True,
-                        )
-                        response = retry_decorator(llm_call)()
-                    else:
-                        if span:
-                            span.end_all()
-                        self._clear_checkpoint(checkpoint_manager, session_id)
-                        return self._finish_run(
-                            effective_hooks,
-                            agent,
-                            {
-                                "answer": f"LLM 调用超时（{self.llm_timeout}s），请稍后重试。",
-                                "success": False,
-                                "steps": step,
-                                "tool_events": collected_events,
-                                "error": "llm_timeout",
-                            },
-                            run_started_at,
-                            session_id,
-                        )
-                except RateLimitError as e:
-                    logger.warning(
-                        "runner event=llm_error agent=%s session_id=%s step=%s "
-                        "error_type=%s",
-                        agent.name,
-                        session_id or "",
-                        step,
-                        type(e).__name__,
-                    )
-                    if span:
-                        span.end_current_span(error=e)
-                    if self.llm_circuit_breaker:
-                        self.llm_circuit_breaker.record_failure()
                     if span:
                         span.end_all()
                     self._clear_checkpoint(checkpoint_manager, session_id)
                     return self._finish_run(
                         effective_hooks,
                         agent,
-                        {
-                            "answer": f"请求过于频繁，请稍后重试。",
-                            "success": False,
-                            "steps": step,
-                            "tool_events": collected_events,
-                            "error": "rate_limit_exceeded",
-                        },
+                        self._build_result(
+                            answer=f"LLM 调用超时（{self.llm_timeout}s），请稍后重试。",
+                            success=False,
+                            steps=step,
+                            tool_events=collected_events,
+                            error="llm_timeout",
+                        ),
                         run_started_at,
                         session_id,
                     )
-                except Exception as e:
-                    logger.exception(
-                        "runner event=llm_error agent=%s session_id=%s step=%s "
-                        "error_type=%s",
-                        agent.name,
-                        session_id or "",
-                        step,
-                        type(e).__name__,
+                except RateLimitError as e:
+                    if span:
+                        span.end_all()
+                    self._clear_checkpoint(checkpoint_manager, session_id)
+                    return self._finish_run(
+                        effective_hooks,
+                        agent,
+                        self._build_result(
+                            answer=f"请求过于频繁，请稍后重试。",
+                            success=False,
+                            steps=step,
+                            tool_events=collected_events,
+                            error="rate_limit_exceeded",
+                        ),
+                        run_started_at,
+                        session_id,
                     )
-                    if self.llm_circuit_breaker:
-                        self.llm_circuit_breaker.record_failure()
-                    raise
-
-                if self.llm_circuit_breaker:
-                    self.llm_circuit_breaker.record_success()
-
-                if span:
-                    span.end_current_span()
 
                 if effective_hooks:
                     effective_hooks.on_llm_end({
@@ -365,13 +625,13 @@ class AgentRunner:
                     return self._finish_run(
                         effective_hooks,
                         agent,
-                        {
-                            "answer": response.output_text or "模型没有返回文本结果。",
-                            "success": True,
-                            "steps": step,
-                            "tool_events": collected_events,
-                            "error": None,
-                        },
+                        self._build_result(
+                            answer=response.output_text or "模型没有返回文本结果。",
+                            success=True,
+                            steps=step,
+                            tool_events=collected_events,
+                            error=None,
+                        ),
                         run_started_at,
                         session_id,
                     )
@@ -383,171 +643,38 @@ class AgentRunner:
                     return self._finish_run(
                         effective_hooks,
                         agent,
-                        {
-                            "answer": "当前 Agent 未配置工具注册中心。",
-                            "success": False,
-                            "steps": step,
-                            "tool_events": collected_events,
-                            "error": "missing_tool_registry",
-                        },
+                        self._build_result(
+                            answer="当前 Agent 未配置工具注册中心。",
+                            success=False,
+                            steps=step,
+                            tool_events=collected_events,
+                            error="missing_tool_registry",
+                        ),
                         run_started_at,
                         session_id,
                     )
 
-                next_input: list[FunctionCallOutput] = []
-
-                for fc in function_calls:
-                    tool_name = fc.name
-                    call_id = fc.call_id
-                    try:
-                        preview_args = json.loads(fc.arguments)
-                    except json.JSONDecodeError:
-                        preview_args = {}
-
-                    if span:
-                        span.start_tool_span(tool_name, preview_args)
-
-                    # Start events are observer-only; final tool_events keep
-                    # their historical success/error-only shape.
-                    if effective_hooks:
-                        effective_hooks.on_tool_start({
-                            "agent_name": agent.name,
-                            "step": step,
-                            "tool_name": tool_name,
-                            "arguments": preview_args,
-                            "status": "start",
-                        })
-
-                    try:
-                        tool_args = json.loads(fc.arguments)
-                        tool_context: dict = {
-                            "agent_name": agent.name,
-                            "step": step,
-                            "tool_name": tool_name,
-                            "arguments": tool_args,
-                        }
-
-                        try:
-                            if self.middleware:
-                                tool_context = self.middleware.before_tool(tool_context)
-                        except MiddlewareAbort as e:
-                            if span:
-                                span.end_current_span()
-                            error_event: ToolCallEvent = {
-                                "agent_name": agent.name,
-                                "step": step,
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "status": "error",
-                                "error": e.message,
-                            }
-                            collected_events.append(error_event)
-                            if effective_hooks:
-                                effective_hooks.on_tool_end(error_event)
-                            agent.on_tool_event(error_event)
-                            result = e.message
-                    except json.JSONDecodeError:
-                        if span:
-                            span.end_current_span()
-                        result = "工具参数解析失败。"
-                    else:
-                        cb = self._circuit_breakers.get(tool_name)
-                        if cb is None:
-                            cb = CircuitBreaker(name=tool_name)
-                            self._circuit_breakers[tool_name] = cb
-
-                        def tool_call() -> str:
-                            if tool_registry.is_async(tool_name):
-                                return asyncio.run(
-                                    tool_registry.call_async(tool_name, **tool_args)
-                                )
-                            return tool_registry.call(tool_name, **tool_args)
-
-                        try:
-                            if cb.state == CircuitBreaker.OPEN:
-                                raise CircuitBreakerOpenError(f"Circuit breaker open for tool: {tool_name}")
-                            result = cb.call(with_timeout, tool_call, 10.0)
-                        except CircuitBreakerOpenError as e:
-                            if span:
-                                span.end_current_span(error=e)
-                            result = f"工具暂时不可用（熔断器打开）：{e}"
-                            tool_event = {
-                                "agent_name": agent.name,
-                                "step": step,
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "status": "error",
-                                "error": str(e),
-                            }
-                            collected_events.append(tool_event)
-                            agent.on_tool_event(tool_event)
-                            if effective_hooks:
-                                effective_hooks.on_tool_end(tool_event)
-                        except ToolTimeoutError:
-                            cb.record_failure()
-                            if span:
-                                span.end_current_span(error=ToolTimeoutError("Tool call timed out"))
-                            result = f"工具执行超时（10s）：{tool_name}"
-                            tool_event = {
-                                "agent_name": agent.name,
-                                "step": step,
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "status": "error",
-                                "error": result,
-                            }
-                            collected_events.append(tool_event)
-                            agent.on_tool_event(tool_event)
-                            if effective_hooks:
-                                effective_hooks.on_tool_end(tool_event)
-                        except Exception as e:
-                            cb.record_failure()
-                            if span:
-                                span.end_current_span(error=e)
-                            result = f"工具执行失败：{e}"
-                            tool_event = {
-                                "agent_name": agent.name,
-                                "step": step,
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "status": "error",
-                                "error": str(e),
-                            }
-                            collected_events.append(tool_event)
-                            agent.on_tool_event(tool_event)
-                            if effective_hooks:
-                                effective_hooks.on_tool_end(tool_event)
-                        else:
-                            if span:
-                                span.end_current_span()
-                            tool_event = {
-                                "agent_name": agent.name,
-                                "step": step,
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "status": "success",
-                                "result": result,
-                            }
-                            collected_events.append(tool_event)
-                            agent.on_tool_event(tool_event)
-                            if effective_hooks:
-                                effective_hooks.on_tool_end(tool_event)
-
-                    next_input.append({
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": result,
-                    })
+                next_input = [
+                    self._execute_tool_call(
+                        agent=agent,
+                        tool_registry=tool_registry,
+                        hooks=effective_hooks,
+                        span=span,
+                        collected_events=collected_events,
+                        step=step,
+                        fc=fc,
+                    )
+                    for fc in function_calls
+                ]
 
                 current_input = next_input
-
-                if checkpoint_manager and session_id:
-                    checkpoint_manager.save(
-                        session_id=session_id,
-                        step=step,
-                        history=list(current_input),
-                        agent_state=agent.get_state(),
-                    )
+                self._save_checkpoint(
+                    checkpoint_manager,
+                    session_id,
+                    step,
+                    next_input,
+                    agent,
+                )
 
             if span:
                 span.end_all()
@@ -555,13 +682,13 @@ class AgentRunner:
             return self._finish_run(
                 effective_hooks,
                 agent,
-                {
-                    "answer": "抱歉，任务执行步数过多，已停止。",
-                    "success": False,
-                    "steps": self.max_steps,
-                    "tool_events": collected_events,
-                    "error": "max_steps_exceeded",
-                },
+                self._build_result(
+                    answer="抱歉，任务执行步数过多，已停止。",
+                    success=False,
+                    steps=self.max_steps,
+                    tool_events=collected_events,
+                    error="max_steps_exceeded",
+                ),
                 run_started_at,
                 session_id,
             )
@@ -578,13 +705,13 @@ class AgentRunner:
             self._emit_run_end(
                 effective_hooks,
                 agent,
-                {
-                    "answer": "",
-                    "success": False,
-                    "steps": last_step,
-                    "tool_events": collected_events,
-                    "error": type(e).__name__,
-                },
+                self._build_result(
+                    answer="",
+                    success=False,
+                    steps=last_step,
+                    tool_events=collected_events,
+                    error=type(e).__name__,
+                ),
                 run_started_at,
                 session_id,
             )
