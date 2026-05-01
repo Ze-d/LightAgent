@@ -67,7 +67,11 @@ class CircuitBreaker:
     def state(self) -> str:
         if self._state == self.OPEN and self._should_attempt_reset():
             self._state = self.HALF_OPEN
-            logger.info(f"Circuit breaker '{self.name}' transitioned to HALF_OPEN")
+            logger.info(
+                "resilience event=circuit_breaker_state_change name=%s state=%s",
+                self.name,
+                self.HALF_OPEN,
+            )
         return self._state
 
     def _should_attempt_reset(self) -> bool:
@@ -79,7 +83,11 @@ class CircuitBreaker:
         if self._state == self.HALF_OPEN:
             self._state = self.CLOSED
             self._failures = 0
-            logger.info(f"Circuit breaker '{self.name}' transitioned to CLOSED")
+            logger.info(
+                "resilience event=circuit_breaker_state_change name=%s state=%s",
+                self.name,
+                self.CLOSED,
+            )
 
     def record_failure(self) -> None:
         self._failures += 1
@@ -88,8 +96,11 @@ class CircuitBreaker:
             if self._state != self.OPEN:
                 self._state = self.OPEN
                 logger.warning(
-                    f"Circuit breaker '{self.name}' transitioned to OPEN "
-                    f"(failures={self._failures})"
+                    "resilience event=circuit_breaker_state_change name=%s "
+                    "state=%s failures=%s",
+                    self.name,
+                    self.OPEN,
+                    self._failures,
                 )
 
     def call(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -164,8 +175,9 @@ def with_retry(
         retry=retry_if_exception_type(retry_on),
         reraise=True,
         before_sleep=lambda retry_state: logger.warning(
-            f"Retry attempt {retry_state.attempt_number} after error: "
-            f"{retry_state.outcome.exception()}"
+            "resilience event=retry_sleep attempt=%s error_type=%s",
+            retry_state.attempt_number,
+            type(retry_state.outcome.exception()).__name__,
         ),
     )
     return decorator(func)()

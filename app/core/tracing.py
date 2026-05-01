@@ -45,13 +45,18 @@ def init_tracing(service_name: str = "myagent") -> trace.Tracer:
             from opentelemetry.exporter.otlp.proto.http import OTLPSpanExporter
             exporter = OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
             provider.add_span_processor(BatchSpanProcessor(exporter))
-            logger.info(f"Tracing enabled with OTLP endpoint: {otlp_endpoint}")
+            logger.info(
+                "tracing event=enabled exporter=otlp endpoint=%s",
+                otlp_endpoint,
+            )
         except ImportError:
             provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-            logger.warning("OTLP exporter not available, using console export")
+            logger.warning(
+                "tracing event=exporter_fallback requested=otlp exporter=console"
+            )
     else:
         provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-        logger.info("Tracing enabled with console export (set OTEL_EXPORTER_OTLP_ENDPOINT for OTLP)")
+        logger.info("tracing event=enabled exporter=console")
 
     trace.set_tracer_provider(provider)
     _tracer = trace.get_tracer(__name__)

@@ -40,11 +40,21 @@ async def lifespan(app: FastAPI):
             "LLM_API_KEY is not set. "
             "Please copy .env.example to .env and fill in your API key."
         )
-    logger.info(f"Starting with model={LLM_MODEL_ID}, max_steps={MAX_STEPS}")
+    logger.info(
+        "api event=startup model=%s max_steps=%s llm_timeout=%s",
+        LLM_MODEL_ID,
+        MAX_STEPS,
+        LLM_TIMEOUT,
+    )
 
     mcp_configs = load_mcp_config()
     if mcp_configs:
         for config in mcp_configs:
+            logger.info(
+                "api event=mcp_register_start server=%s transport=%s",
+                config.name,
+                config.transport,
+            )
             await mcp_registry.register_mcp_server(
                 name=config.name,
                 command=config.command,
@@ -52,6 +62,11 @@ async def lifespan(app: FastAPI):
                 transport=config.transport,
                 server_url=config.server_url,
                 extra_env=config.extra_env,
+            )
+            logger.info(
+                "api event=mcp_register_end server=%s transport=%s",
+                config.name,
+                config.transport,
             )
 
     yield
@@ -119,19 +134,28 @@ def _record_session_memory(session_id: str, user_message: str, assistant_message
             assistant_message=assistant_message,
         )
     except Exception as e:
-        logger.warning(f"Failed to write session memory: session_id={session_id}, error={e}")
+        logger.warning(
+            "api event=session_memory_write_failed session_id=%s error_type=%s",
+            session_id,
+            type(e).__name__,
+        )
 
 
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 def chat(req: ChatRequest) -> ChatResponse:
-    logger.info("Received /chat request")
+    logger.info(
+        "api event=chat_request session_id=%s has_session=%s message_chars=%s",
+        req.session_id or "",
+        req.session_id is not None,
+        len(req.message),
+    )
     # 1. 处理会话初始化或读取
     if req.session_id is None:
         history: list[ChatMessage] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
         session_id = session_manager.create(history)
-        logger.debug(f"Created new session: {session_id}")
+        logger.debug("api event=session_created session_id=%s", session_id)
     else:
         session_id = req.session_id
         history: list[ChatMessage] | None = session_manager.load(session_id)
@@ -151,8 +175,9 @@ def chat(req: ChatRequest) -> ChatResponse:
     checkpoint = checkpoint_manager.load(session_id)
     if checkpoint:
         logger.warning(
-            f"Discarding stale checkpoint before new user turn: "
-            f"session_id={session_id}, step={checkpoint.step}"
+            "api event=checkpoint_discarded session_id=%s step=%s",
+            session_id,
+            checkpoint.step,
         )
         checkpoint_manager.clear(session_id)
 
@@ -175,7 +200,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
         answer = run_result["answer"]
     except Exception as e:
-        logger.exception("Agent run failed")
+        logger.exception(
+            "api event=agent_run_failed session_id=%s error_type=%s",
+            session_id,
+            type(e).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Agent execution failed: {e}"
@@ -190,6 +219,12 @@ def chat(req: ChatRequest) -> ChatResponse:
     # 5. 回写会话
     session_manager.save(session_id, history)
     _record_session_memory(session_id, req.message, answer)
+    logger.info(
+        "api event=chat_response session_id=%s history_length=%s answer_chars=%s",
+        session_id,
+        len(history),
+        len(answer),
+    )
 
     return ChatResponse(
         session_id=session_id,
@@ -200,6 +235,12 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 @app.post("/chat/stream", response_class=EventSourceResponse)
 async def chat_stream(req: ChatRequest):
+    logger.info(
+        "api event=chat_stream_request session_id=%s has_session=%s message_chars=%s",
+        req.session_id or "",
+        req.session_id is not None,
+        len(req.message),
+    )
     channel = EventChannel()
     # Create SSEHooks with the event loop for cross-thread event publishing
     loop = asyncio.get_event_loop()
@@ -212,6 +253,7 @@ async def chat_stream(req: ChatRequest):
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
         session_id = session_manager.create(history)
+        logger.debug("api event=session_created session_id=%s", session_id)
         await channel.publish({
             "event": "session_created",
             "data": {"session_id": session_id}
@@ -237,8 +279,9 @@ async def chat_stream(req: ChatRequest):
     checkpoint = checkpoint_manager.load(session_id)
     if checkpoint:
         logger.warning(
-            f"Discarding stale checkpoint before new user turn: "
-            f"session_id={session_id}, step={checkpoint.step}"
+            "api event=checkpoint_discarded session_id=%s step=%s",
+            session_id,
+            checkpoint.step,
         )
         checkpoint_manager.clear(session_id)
 
@@ -282,7 +325,19 @@ async def chat_stream(req: ChatRequest):
                     "history_length": len(history),
                 }
             })
+            logger.info(
+                "api event=chat_stream_response session_id=%s "
+                "history_length=%s answer_chars=%s",
+                session_id,
+                len(history),
+                len(answer),
+            )
         except Exception as e:
+            logger.exception(
+                "api event=chat_stream_failed session_id=%s error_type=%s",
+                session_id,
+                type(e).__name__,
+            )
             await channel.publish({
                 "event": "error",
                 "data": {"message": str(e)}

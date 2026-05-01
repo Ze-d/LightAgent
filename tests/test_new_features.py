@@ -114,7 +114,7 @@ class TestHistoryTrimMiddleware:
 
 class TestDocumentMemoryStore:
     def _store(self) -> DocumentMemoryStore:
-        return DocumentMemoryStore(Path(".test-runtime") / "memory" / str(uuid4()))
+        return DocumentMemoryStore(Path("test-runtime") / "memory" / str(uuid4()))
 
     def test_comment_only_defaults_do_not_enter_context(self):
         store = self._store()

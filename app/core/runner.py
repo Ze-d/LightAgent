@@ -67,6 +67,7 @@ class AgentRunner:
     ) -> None:
         if checkpoint_manager and session_id:
             checkpoint_manager.clear(session_id)
+            logger.debug("runner event=checkpoint_clear session_id=%s", session_id)
 
     def _emit_run_end(
         self,
@@ -156,7 +157,10 @@ class AgentRunner:
             return False, None
 
         raw_input = last_msg.get("content", "")
-        return self.skill_dispatcher.try_invoke(raw_input, agent.name)
+        invoked, result = self.skill_dispatcher.try_invoke(raw_input, agent.name)
+        if invoked:
+            logger.info("runner event=skill_invoked agent=%s", agent.name)
+        return invoked, result
 
     def _apply_llm_middleware(
         self,
@@ -190,6 +194,13 @@ class AgentRunner:
             self.llm_circuit_breaker
             and self.llm_circuit_breaker.state == CircuitBreaker.OPEN
         ):
+            logger.warning(
+                "runner event=llm_circuit_breaker_open agent=%s session_id=%s "
+                "step=%s",
+                agent.name,
+                session_id or "",
+                step,
+            )
             raise CircuitBreakerOpenError("LLM circuit breaker is open")
 
         def llm_call():
@@ -318,6 +329,15 @@ class AgentRunner:
             except MiddlewareAbort as e:
                 if span:
                     span.end_current_span()
+                logger.warning(
+                    "runner event=tool_error agent=%s step=%s tool=%s "
+                    "status=%s error_type=%s",
+                    agent.name,
+                    step,
+                    tool_name,
+                    "middleware_abort",
+                    type(e).__name__,
+                )
                 error_event: ToolCallEvent = {
                     "agent_name": agent.name,
                     "step": step,
@@ -334,6 +354,15 @@ class AgentRunner:
         except json.JSONDecodeError:
             if span:
                 span.end_current_span()
+            logger.warning(
+                "runner event=tool_error agent=%s step=%s tool=%s "
+                "status=%s error_type=%s",
+                agent.name,
+                step,
+                tool_name,
+                "invalid_arguments",
+                "JSONDecodeError",
+            )
             result = "工具参数解析失败。"
         else:
             cb = self._get_tool_circuit_breaker(tool_name)
@@ -355,6 +384,15 @@ class AgentRunner:
                 if span:
                     span.end_current_span(error=e)
                 result = f"工具暂时不可用（熔断器打开）：{e}"
+                logger.warning(
+                    "runner event=tool_error agent=%s step=%s tool=%s "
+                    "status=%s error_type=%s",
+                    agent.name,
+                    step,
+                    tool_name,
+                    "circuit_breaker_open",
+                    type(e).__name__,
+                )
                 tool_event: ToolCallEvent = {
                     "agent_name": agent.name,
                     "step": step,
@@ -372,6 +410,15 @@ class AgentRunner:
                 if span:
                     span.end_current_span(error=ToolTimeoutError("Tool call timed out"))
                 result = f"工具执行超时（10s）：{tool_name}"
+                logger.warning(
+                    "runner event=tool_error agent=%s step=%s tool=%s "
+                    "status=%s error_type=%s",
+                    agent.name,
+                    step,
+                    tool_name,
+                    "timeout",
+                    "TimeoutError",
+                )
                 tool_event = {
                     "agent_name": agent.name,
                     "step": step,
@@ -389,6 +436,15 @@ class AgentRunner:
                 if span:
                     span.end_current_span(error=e)
                 result = f"工具执行失败：{e}"
+                logger.warning(
+                    "runner event=tool_error agent=%s step=%s tool=%s "
+                    "status=%s error_type=%s",
+                    agent.name,
+                    step,
+                    tool_name,
+                    "exception",
+                    type(e).__name__,
+                )
                 tool_event = {
                     "agent_name": agent.name,
                     "step": step,
@@ -404,6 +460,14 @@ class AgentRunner:
             else:
                 if span:
                     span.end_current_span()
+                logger.info(
+                    "runner event=tool_success agent=%s step=%s tool=%s "
+                    "result_chars=%s",
+                    agent.name,
+                    step,
+                    tool_name,
+                    len(str(result)),
+                )
                 tool_event = {
                     "agent_name": agent.name,
                     "step": step,
@@ -437,6 +501,13 @@ class AgentRunner:
                 step=step,
                 history=list(current_input),
                 agent_state=agent.get_state(),
+            )
+            logger.debug(
+                "runner event=checkpoint_save session_id=%s step=%s "
+                "history_length=%s",
+                session_id,
+                step,
+                len(current_input),
             )
 
     def run(
@@ -589,7 +660,7 @@ class AgentRunner:
                         run_started_at,
                         session_id,
                     )
-                except RateLimitError as e:
+                except RateLimitError:
                     if span:
                         span.end_all()
                     self._clear_checkpoint(checkpoint_manager, session_id)
