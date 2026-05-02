@@ -113,6 +113,7 @@ async def root():
 
 
 def _strip_memory_messages(history: list[ChatMessage]) -> list[ChatMessage]:
+    """Remove transient memory context before persisting or rebuilding history."""
     return [
         message for message in history
         if not (
@@ -123,6 +124,7 @@ def _strip_memory_messages(history: list[ChatMessage]) -> list[ChatMessage]:
 
 
 def _build_runner_history(history: list[ChatMessage], session_id: str) -> list[ChatMessage]:
+    """Inject read-only memory context into the prompt sent to AgentRunner."""
     clean_history = _strip_memory_messages(history)
     memory_context = memory_store.build_context(session_id=session_id)
     if not memory_context:
@@ -138,6 +140,7 @@ def _build_runner_history(history: list[ChatMessage], session_id: str) -> list[C
 
 
 def _record_session_memory(session_id: str, user_message: str, assistant_message: str) -> None:
+    """Best-effort memory write; chat responses should not fail on memory errors."""
     try:
         memory_store.append_session_exchange(
             session_id=session_id,
@@ -153,6 +156,7 @@ def _record_session_memory(session_id: str, user_message: str, assistant_message
 
 
 def _create_session() -> tuple[str, list[ChatMessage]]:
+    """Create a new in-memory chat session with the system prompt."""
     history: list[ChatMessage] = [
         {"role": "system", "content": SYSTEM_PROMPT}
     ]
@@ -162,6 +166,7 @@ def _create_session() -> tuple[str, list[ChatMessage]]:
 
 
 def _load_session(session_id: str) -> list[ChatMessage]:
+    """Load persisted chat history or raise the HTTP error used by /chat."""
     history = session_manager.load(session_id)
     if history is None:
         raise HTTPException(
@@ -172,6 +177,7 @@ def _load_session(session_id: str) -> list[ChatMessage]:
 
 
 def _resolve_session(req: ChatRequest) -> tuple[str, list[ChatMessage], bool]:
+    """Return session state plus whether this request created the session."""
     if req.session_id is None:
         session_id, history = _create_session()
         return session_id, history, True
@@ -179,6 +185,7 @@ def _resolve_session(req: ChatRequest) -> tuple[str, list[ChatMessage], bool]:
 
 
 def _build_chat_agent() -> ToolAwareAgent:
+    """Create a fresh agent instance for one user turn."""
     return ToolAwareAgent(
         name="chat-agent",
         model=LLM_MODEL_ID,
@@ -187,6 +194,11 @@ def _build_chat_agent() -> ToolAwareAgent:
 
 
 def _discard_stale_checkpoint(session_id: str) -> None:
+    """Drop unfinished progress before accepting a new user turn.
+
+    A checkpoint represents an interrupted previous run. Once the user submits a
+    new message, resuming that stale tool state would mix two different turns.
+    """
     checkpoint = checkpoint_manager.load(session_id)
     if not checkpoint:
         return
@@ -204,6 +216,7 @@ def _append_user_turn(
     history: list[ChatMessage],
     message: str,
 ) -> None:
+    """Persist the user message before running the agent."""
     history.append({
         "role": "user",
         "content": message,
@@ -214,6 +227,7 @@ def _append_user_turn(
 def _prepare_agent_turn(
     req: ChatRequest,
 ) -> tuple[str, list[ChatMessage], list[ChatMessage], ToolAwareAgent, bool]:
+    """Build the shared state needed by both sync and streaming chat endpoints."""
     session_id, history, created = _resolve_session(req)
     agent = _build_chat_agent()
     _discard_stale_checkpoint(session_id)
@@ -228,6 +242,7 @@ def _run_agent(
     session_id: str,
     hooks: CompositeRunnerHooks | None = None,
 ) -> AgentRunResult:
+    """Call AgentRunner with the app-level registry and checkpoint manager."""
     return runner.run(
         agent=agent,
         history=runner_history,
@@ -244,6 +259,7 @@ def _persist_assistant_turn(
     user_message: str,
     answer: str,
 ) -> None:
+    """Persist the assistant reply and append a compact memory record."""
     history.append({
         "role": "assistant",
         "content": answer,
@@ -304,7 +320,7 @@ async def chat_stream(req: ChatRequest):
         len(req.message),
     )
     channel = EventChannel()
-    # Create SSEHooks with the event loop for cross-thread event publishing
+    # SSE hooks publish from a worker thread back onto this event loop.
     loop = asyncio.get_event_loop()
     sse_hooks = SSEHooks(channel=channel, loop=loop)
     run_hooks = CompositeRunnerHooks([LoggingHooks(), sse_hooks])
@@ -327,8 +343,8 @@ async def chat_stream(req: ChatRequest):
 
     async def run_agent():
         try:
-            # Use run_in_executor to run sync runner.run() in thread pool
-            # This prevents blocking the event loop, allowing SSE events to stream
+            # Keep AgentRunner synchronous and move it off the event loop here,
+            # otherwise queued SSE events cannot flush while the agent is busy.
             run_result = await loop.run_in_executor(
                 None,  # use default thread pool
                 lambda: _run_agent(

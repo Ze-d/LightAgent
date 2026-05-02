@@ -35,6 +35,14 @@ DEFAULT_MAX_RETRIES = 3
 
 
 class AgentRunner:
+    """Run an agent turn through LLM reasoning, tools, hooks, and checkpoints.
+
+    The public contract is intentionally small: callers pass an agent, chat
+    history, and optional tool/checkpoint/hook integrations, then receive a
+    structured AgentRunResult. The loop stays synchronous so FastAPI can choose
+    whether to call it directly or move it to a worker thread for SSE streaming.
+    """
+
     def __init__(
         self,
         client: OpenAI,
@@ -65,6 +73,7 @@ class AgentRunner:
         checkpoint_manager: CheckpointManager | None,
         session_id: str | None,
     ) -> None:
+        """Clear saved progress once a run reaches a terminal state."""
         if checkpoint_manager and session_id:
             checkpoint_manager.clear(session_id)
             logger.debug("runner event=checkpoint_clear session_id=%s", session_id)
@@ -149,6 +158,7 @@ class AgentRunner:
         agent: BaseAgent,
         history: list[ChatMessage],
     ) -> tuple[bool, Any]:
+        """Handle slash-style skill commands before spending an LLM call."""
         if not self.skill_dispatcher or not history:
             return False, None
 
@@ -168,6 +178,7 @@ class AgentRunner:
         current_input: list[dict] | str,
         step: int,
     ) -> list[dict] | str:
+        """Allow middleware to inspect or replace the next LLM input."""
         llm_context: dict = {
             "agent_name": agent.name,
             "model": agent.model,
@@ -187,6 +198,12 @@ class AgentRunner:
         session_id: str | None,
         span: AgentSpan | None,
     ) -> Any:
+        """Call the model with rate limiting, timeout, retry, and circuit breaker.
+
+        User-facing error mapping stays in run(), so this method can focus on
+        transport and resilience mechanics while preserving the old result
+        messages for callers.
+        """
         if self.rate_limiter:
             self.rate_limiter.acquire(timeout=5.0)
 
@@ -293,6 +310,12 @@ class AgentRunner:
         step: int,
         fc: Any,
     ) -> FunctionCallOutput:
+        """Execute one function_call item and emit the matching tool events.
+
+        The final AgentRunResult keeps only success/error tool events. The
+        start event is still sent to hooks so streaming clients can render a
+        tool-start notification without changing historical result payloads.
+        """
         tool_name = fc.name
         call_id = fc.call_id
         try:
@@ -325,6 +348,8 @@ class AgentRunner:
 
             try:
                 if self.middleware:
+                    # before_tool may abort, but its returned context is not a
+                    # supported mutation point for the actual tool arguments.
                     self.middleware.before_tool(tool_context)
             except MiddlewareAbort as e:
                 if span:
@@ -495,6 +520,7 @@ class AgentRunner:
         current_input: list[FunctionCallOutput],
         agent: BaseAgent,
     ) -> None:
+        """Persist the next model input after a tool round completes."""
         if checkpoint_manager and session_id:
             checkpoint_manager.save(
                 session_id=session_id,
@@ -519,6 +545,15 @@ class AgentRunner:
         session_id: str | None = None,
         checkpoint_manager: CheckpointManager | None = None,
     ) -> AgentRunResult:
+        """Execute one agent turn.
+
+        Flow:
+        1. emit run start hooks and initialize tracing;
+        2. short-circuit slash skills when present;
+        3. repeat LLM call -> optional tool calls until a final answer appears;
+        4. save checkpoints after tool rounds and clear them on any terminal
+           result.
+        """
         effective_hooks = hooks if hooks is not None else self.hooks
         tracer = get_tracer() if self.enable_tracing else None
         run_started_at = time.perf_counter()
@@ -545,6 +580,8 @@ class AgentRunner:
             self.max_steps,
             len(tools),
         )
+        # Tracing is owned by the runner so hook implementations can remain
+        # lightweight observers rather than mandatory tracing adapters.
         span = self._start_run_span(tracer, agent)
 
         invoked, skill_result = self._try_invoke_skill(agent, history)

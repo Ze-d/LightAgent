@@ -1,7 +1,7 @@
-from app.obj.types import ToolSpec
 from typing import Any
-import asyncio
 import inspect
+
+from app.obj.types import ToolSpec
 
 
 class ToolRegistry:
