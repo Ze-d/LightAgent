@@ -43,8 +43,10 @@ runner continues in FastAPI background tasks.
 ## Limitations
 
 - No push notifications.
-- No task cancellation.
 - No `tasks/{id}:subscribe` replay stream.
 - Stream events are coarse grained: submitted/working/final artifact/final
   status. Tool-level A2A event mapping is left for the next phase.
 - Task store is in-memory and process-local.
+
+Task cancellation and terminal-state protection were added in P2. See
+`docs/a2a-p2-task-lifecycle.md`.

@@ -8,6 +8,7 @@ from app.a2a.adapter import A2AAdapterError, A2AProtocolAdapter
 from app.a2a.schemas import (
     A2ARole,
     Artifact,
+    CancelTaskRequest,
     ListTasksResponse,
     Message,
     SendMessageRequest,
@@ -22,6 +23,7 @@ from app.a2a.task_store import (
     InMemoryA2ATaskStore,
     TaskConflictError,
     TaskNotFoundError,
+    TaskNotCancelableError,
 )
 from app.obj.types import AgentRunResult
 
@@ -46,6 +48,11 @@ class A2ABadRequestError(A2AServiceError):
 class A2ATaskNotFoundServiceError(A2AServiceError):
     status_code = 404
     error_code = "task_not_found"
+
+
+class A2ATaskNotCancelableServiceError(A2AServiceError):
+    status_code = 400
+    error_code = "task_not_cancelable"
 
 
 class A2AService:
@@ -94,7 +101,10 @@ class A2AService:
         message: Message,
         context_id: str,
     ) -> Task:
-        self.task_store.mark_working(task_id, message=message)
+        task = self.task_store.mark_working(task_id, message=message)
+        if task.status.state == TaskState.canceled:
+            return task
+
         try:
             result = self.run_turn(message, context_id)
         except Exception as e:
@@ -168,6 +178,22 @@ class A2AService:
             return self.task_store.require(task_id, history_length=history_length)
         except TaskNotFoundError as e:
             raise A2ATaskNotFoundServiceError(f"Task not found: {task_id}") from e
+
+    def cancel_task(
+        self,
+        task_id: str,
+        request: CancelTaskRequest | None = None,
+    ) -> Task:
+        request_metadata = request.metadata if request is not None else {}
+        try:
+            return self.task_store.cancel(
+                task_id,
+                metadata=request_metadata,
+            )
+        except TaskNotFoundError as e:
+            raise A2ATaskNotFoundServiceError(f"Task not found: {task_id}") from e
+        except TaskNotCancelableError as e:
+            raise A2ATaskNotCancelableServiceError(str(e)) from e
 
     def list_tasks(
         self,

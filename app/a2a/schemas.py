@@ -149,6 +149,14 @@ class TaskArtifactUpdateEvent(A2ABaseModel):
 StreamEvent = TaskStatusUpdateEvent | TaskArtifactUpdateEvent
 
 
+TERMINAL_TASK_STATES = frozenset({
+    TaskState.completed,
+    TaskState.failed,
+    TaskState.canceled,
+    TaskState.rejected,
+})
+
+
 class SendMessageConfiguration(A2ABaseModel):
     accepted_output_modes: list[str] = Field(
         default_factory=list,
@@ -168,6 +176,11 @@ class SendMessageRequest(A2ABaseModel):
     configuration: SendMessageConfiguration = Field(
         default_factory=SendMessageConfiguration,
     )
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CancelTaskRequest(A2ABaseModel):
+    tenant: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

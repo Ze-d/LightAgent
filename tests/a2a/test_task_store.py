@@ -1,7 +1,11 @@
 import pytest
 
 from app.a2a.schemas import A2ARole, Message, Part, TaskState
-from app.a2a.task_store import InMemoryA2ATaskStore, TaskNotFoundError
+from app.a2a.task_store import (
+    InMemoryA2ATaskStore,
+    TaskNotCancelableError,
+    TaskNotFoundError,
+)
 
 
 def test_task_store_prepares_new_task_for_message():
@@ -47,3 +51,40 @@ def test_task_store_raises_for_missing_task():
 
     with pytest.raises(TaskNotFoundError):
         store.require("missing")
+
+
+def test_task_store_cancels_submitted_task():
+    store = InMemoryA2ATaskStore()
+    task, _ = store.prepare_task_for_message(
+        Message(role=A2ARole.user, parts=[Part(text="cancel me")])
+    )
+
+    canceled = store.cancel(task.id)
+
+    assert canceled.status.state == TaskState.canceled
+    assert canceled.status.message.parts[0].text == "Task canceled by client."
+    assert store.require(task.id).status.state == TaskState.canceled
+
+
+def test_task_store_does_not_overwrite_canceled_task_with_completion():
+    store = InMemoryA2ATaskStore()
+    task, _ = store.prepare_task_for_message(
+        Message(role=A2ARole.user, parts=[Part(text="cancel me")])
+    )
+
+    store.cancel(task.id)
+    completed = store.complete(task.id, answer="late result")
+
+    assert completed.status.state == TaskState.canceled
+    assert completed.artifacts == []
+
+
+def test_task_store_rejects_cancel_for_completed_task():
+    store = InMemoryA2ATaskStore()
+    task, _ = store.prepare_task_for_message(
+        Message(role=A2ARole.user, parts=[Part(text="finish")])
+    )
+    store.complete(task.id, answer="done")
+
+    with pytest.raises(TaskNotCancelableError):
+        store.cancel(task.id)

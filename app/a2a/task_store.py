@@ -10,6 +10,7 @@ from app.a2a.schemas import (
     ListTasksResponse,
     Message,
     Part,
+    TERMINAL_TASK_STATES,
     Task,
     TaskState,
     TaskStatus,
@@ -26,6 +27,10 @@ class TaskNotFoundError(KeyError):
 
 
 class TaskConflictError(ValueError):
+    pass
+
+
+class TaskNotCancelableError(ValueError):
     pass
 
 
@@ -48,6 +53,9 @@ class InMemoryA2ATaskStore:
             else:
                 copied.history = copied.history[-history_length:]
         return copied
+
+    def _is_terminal(self, task: Task) -> bool:
+        return task.status.state in TERMINAL_TASK_STATES
 
     def _bind_message(
         self,
@@ -76,6 +84,10 @@ class InMemoryA2ATaskStore:
                 task = self._tasks.get(message.task_id)
                 if task is None:
                     raise TaskNotFoundError(message.task_id)
+                if self._is_terminal(task):
+                    raise TaskConflictError(
+                        "Cannot append a message to a terminal task"
+                    )
                 context_id = message.context_id or task.context_id
                 if context_id != task.context_id:
                     raise TaskConflictError(
@@ -167,6 +179,8 @@ class InMemoryA2ATaskStore:
             task = self._tasks.get(task_id)
             if task is None:
                 raise TaskNotFoundError(task_id)
+            if self._is_terminal(task):
+                return self._copy(task)
             task.status = TaskStatus(
                 state=TaskState.working,
                 message=message,
@@ -186,6 +200,8 @@ class InMemoryA2ATaskStore:
             task = self._tasks.get(task_id)
             if task is None:
                 raise TaskNotFoundError(task_id)
+            if self._is_terminal(task):
+                return self._copy(task)
 
             message = Message(
                 role=A2ARole.agent,
@@ -215,6 +231,8 @@ class InMemoryA2ATaskStore:
             task = self._tasks.get(task_id)
             if task is None:
                 raise TaskNotFoundError(task_id)
+            if self._is_terminal(task):
+                return self._copy(task)
 
             message = Message(
                 role=A2ARole.agent,
@@ -226,6 +244,45 @@ class InMemoryA2ATaskStore:
             task.history.append(message)
             task.status = TaskStatus(
                 state=TaskState.failed,
+                message=message,
+                timestamp=utc_now_iso(),
+            )
+            task.metadata.update(metadata or {})
+            return self._copy(task)
+
+    def cancel(
+        self,
+        task_id: str,
+        *,
+        reason: str = "Task canceled by client.",
+        metadata: dict | None = None,
+    ) -> Task:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise TaskNotFoundError(task_id)
+
+            if task.status.state == TaskState.canceled:
+                return self._copy(task)
+            if task.status.state in {
+                TaskState.completed,
+                TaskState.failed,
+                TaskState.rejected,
+            }:
+                raise TaskNotCancelableError(
+                    f"Task is already terminal: {task.status.state}"
+                )
+
+            message = Message(
+                role=A2ARole.agent,
+                messageId=str(uuid4()),
+                taskId=task.id,
+                contextId=task.context_id,
+                parts=[Part(text=reason, mediaType=TEXT_PLAIN)],
+            )
+            task.history.append(message)
+            task.status = TaskStatus(
+                state=TaskState.canceled,
                 message=message,
                 timestamp=utc_now_iso(),
             )

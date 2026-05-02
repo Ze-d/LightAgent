@@ -6,6 +6,7 @@ from app.core.sse import EventSourceResponse
 from app.a2a.schemas import (
     A2A_PROTOCOL_VERSION,
     AgentCard,
+    CancelTaskRequest,
     ListTasksResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -74,6 +75,16 @@ def build_a2a_router(
                 task_id,
                 history_length=history_length,
             )
+        except A2AServiceError as e:
+            raise_service_error(e)
+
+    @router.post("/a2a/v1/tasks/{task_id}:cancel", response_model=Task)
+    def cancel_task(
+        task_id: str,
+        request: CancelTaskRequest | None = None,
+    ) -> Task:
+        try:
+            return service.cancel_task(task_id, request=request)
         except A2AServiceError as e:
             raise_service_error(e)
 
