@@ -6,7 +6,13 @@ from fastapi.sse import EventSourceResponse
 from openai import OpenAI
 
 from app.agents.tool_aware_agent import ToolAwareAgent
-from app.configs.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_ID, MAX_STEPS,LLM_TIMEOUT
+from app.configs.config import (
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_MODEL_ID,
+    LLM_TIMEOUT,
+    MAX_STEPS,
+)
 from app.core.hooks import CompositeRunnerHooks
 from app.core.middleware import CompositeRunnerMiddleware
 from app.hooks.logging_hooks import LoggingHooks
@@ -17,7 +23,7 @@ from app.security.input_guard import InputGuardMiddleware
 from app.prompts.prompt import SYSTEM_PROMPT
 from app.configs.logger import logger
 from app.obj.schemas import ChatRequest, ChatResponse
-from app.obj.types import ChatMessage
+from app.obj.types import AgentRunResult, ChatMessage
 from app.core.runner import AgentRunner
 from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.core.event_channel import EventChannel
@@ -80,9 +86,14 @@ composite_middleware = CompositeRunnerMiddleware([
 ])
 
 app = FastAPI(title="Minimal Agent API", lifespan=lifespan)
-client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT )
-runner = AgentRunner(client=client, max_steps=MAX_STEPS, hooks=composite_hooks, middleware=composite_middleware)
-session_manager : BaseSessionManager = InMemorySessionManager()
+client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT)
+runner = AgentRunner(
+    client=client,
+    max_steps=MAX_STEPS,
+    hooks=composite_hooks,
+    middleware=composite_middleware,
+)
+session_manager: BaseSessionManager = InMemorySessionManager()
 checkpoint_manager = CheckpointManager()
 memory_store = DocumentMemoryStore()
 tool_registry = build_default_registry()
@@ -141,6 +152,106 @@ def _record_session_memory(session_id: str, user_message: str, assistant_message
         )
 
 
+def _create_session() -> tuple[str, list[ChatMessage]]:
+    history: list[ChatMessage] = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+    session_id = session_manager.create(history)
+    logger.debug("api event=session_created session_id=%s", session_id)
+    return session_id, history
+
+
+def _load_session(session_id: str) -> list[ChatMessage]:
+    history = session_manager.load(session_id)
+    if history is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+    return _strip_memory_messages(history)
+
+
+def _resolve_session(req: ChatRequest) -> tuple[str, list[ChatMessage], bool]:
+    if req.session_id is None:
+        session_id, history = _create_session()
+        return session_id, history, True
+    return req.session_id, _load_session(req.session_id), False
+
+
+def _build_chat_agent() -> ToolAwareAgent:
+    return ToolAwareAgent(
+        name="chat-agent",
+        model=LLM_MODEL_ID,
+        system_prompt=SYSTEM_PROMPT,
+    )
+
+
+def _discard_stale_checkpoint(session_id: str) -> None:
+    checkpoint = checkpoint_manager.load(session_id)
+    if not checkpoint:
+        return
+
+    logger.warning(
+        "api event=checkpoint_discarded session_id=%s step=%s",
+        session_id,
+        checkpoint.step,
+    )
+    checkpoint_manager.clear(session_id)
+
+
+def _append_user_turn(
+    session_id: str,
+    history: list[ChatMessage],
+    message: str,
+) -> None:
+    history.append({
+        "role": "user",
+        "content": message,
+    })
+    session_manager.save(session_id, history)
+
+
+def _prepare_agent_turn(
+    req: ChatRequest,
+) -> tuple[str, list[ChatMessage], list[ChatMessage], ToolAwareAgent, bool]:
+    session_id, history, created = _resolve_session(req)
+    agent = _build_chat_agent()
+    _discard_stale_checkpoint(session_id)
+    _append_user_turn(session_id, history, req.message)
+    runner_history = _build_runner_history(history, session_id)
+    return session_id, history, runner_history, agent, created
+
+
+def _run_agent(
+    agent: ToolAwareAgent,
+    runner_history: list[ChatMessage],
+    session_id: str,
+    hooks: CompositeRunnerHooks | None = None,
+) -> AgentRunResult:
+    return runner.run(
+        agent=agent,
+        history=runner_history,
+        tool_registry=tool_registry,
+        hooks=hooks,
+        session_id=session_id,
+        checkpoint_manager=checkpoint_manager,
+    )
+
+
+def _persist_assistant_turn(
+    session_id: str,
+    history: list[ChatMessage],
+    user_message: str,
+    answer: str,
+) -> None:
+    history.append({
+        "role": "assistant",
+        "content": answer,
+    })
+    session_manager.save(session_id, history)
+    _record_session_memory(session_id, user_message, answer)
+
+
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 def chat(req: ChatRequest) -> ChatResponse:
     logger.info(
@@ -149,54 +260,13 @@ def chat(req: ChatRequest) -> ChatResponse:
         req.session_id is not None,
         len(req.message),
     )
-    # 1. 处理会话初始化或读取
-    if req.session_id is None:
-        history: list[ChatMessage] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
-        session_id = session_manager.create(history)
-        logger.debug("api event=session_created session_id=%s", session_id)
-    else:
-        session_id = req.session_id
-        history: list[ChatMessage] | None = session_manager.load(session_id)
-        if history is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Session not found: {session_id}"
-            )
-        history = _strip_memory_messages(history)
+    session_id, history, runner_history, agent, _ = _prepare_agent_turn(req)
 
-    # 2. 创建ToolAwareAgent并丢弃上一轮未完成的checkpoint
-    agent = ToolAwareAgent(
-        name="chat-agent",
-        model=LLM_MODEL_ID,
-        system_prompt=SYSTEM_PROMPT,
-    )
-    checkpoint = checkpoint_manager.load(session_id)
-    if checkpoint:
-        logger.warning(
-            "api event=checkpoint_discarded session_id=%s step=%s",
-            session_id,
-            checkpoint.step,
-        )
-        checkpoint_manager.clear(session_id)
-
-    # 3. 追加用户消息
-    history.append({
-        "role": "user",
-        "content": req.message,
-    })
-    session_manager.save(session_id, history)
-    runner_history = _build_runner_history(history, session_id)
-
-    # 4. 调用 Agent
     try:
-        run_result = runner.run(
+        run_result = _run_agent(
             agent=agent,
-            history=runner_history,
-            tool_registry=tool_registry,
+            runner_history=runner_history,
             session_id=session_id,
-            checkpoint_manager=checkpoint_manager,
         )
         answer = run_result["answer"]
     except Exception as e:
@@ -210,15 +280,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             detail=f"Agent execution failed: {e}"
         )
 
-    # 4. 保存 assistant 消息
-    history.append({
-        "role": "assistant",
-        "content": answer,
-    })
-
-    # 5. 回写会话
-    session_manager.save(session_id, history)
-    _record_session_memory(session_id, req.message, answer)
+    _persist_assistant_turn(session_id, history, req.message, answer)
     logger.info(
         "api event=chat_response session_id=%s history_length=%s answer_chars=%s",
         session_id,
@@ -247,75 +309,37 @@ async def chat_stream(req: ChatRequest):
     sse_hooks = SSEHooks(channel=channel, loop=loop)
     run_hooks = CompositeRunnerHooks([LoggingHooks(), sse_hooks])
 
-    # 1. 初始化会话
-    if req.session_id is None:
-        history: list[ChatMessage] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
-        session_id = session_manager.create(history)
-        logger.debug("api event=session_created session_id=%s", session_id)
+    try:
+        session_id, history, runner_history, agent, created = _prepare_agent_turn(req)
+    except HTTPException as e:
+        await channel.publish({
+            "event": "error",
+            "data": {"message": str(e.detail)}
+        })
+        await channel.close()
+        return
+
+    if created:
         await channel.publish({
             "event": "session_created",
             "data": {"session_id": session_id}
         })
-    else:
-        session_id = req.session_id
-        loaded_history: list[ChatMessage] | None = session_manager.load(session_id)
-        if loaded_history is None:
-            await channel.publish({
-                "event": "error",
-                "data": {"message": f"Session not found: {session_id}"}
-            })
-            await channel.close()
-            return
-        history = _strip_memory_messages(loaded_history)
 
-    # 2. 创建ToolAwareAgent并丢弃上一轮未完成的checkpoint
-    agent = ToolAwareAgent(
-        name="chat-agent",
-        model=LLM_MODEL_ID,
-        system_prompt=SYSTEM_PROMPT,
-    )
-    checkpoint = checkpoint_manager.load(session_id)
-    if checkpoint:
-        logger.warning(
-            "api event=checkpoint_discarded session_id=%s step=%s",
-            session_id,
-            checkpoint.step,
-        )
-        checkpoint_manager.clear(session_id)
-
-    # 3. 追加用户消息
-    history.append({
-        "role": "user",
-        "content": req.message,
-    })
-    session_manager.save(session_id, history)
-    runner_history = _build_runner_history(history, session_id)
-
-    # 4. 在后台跑 runner，过程中事件会持续进入 channel
     async def run_agent():
         try:
             # Use run_in_executor to run sync runner.run() in thread pool
             # This prevents blocking the event loop, allowing SSE events to stream
             run_result = await loop.run_in_executor(
                 None,  # use default thread pool
-                lambda: runner.run(
+                lambda: _run_agent(
                     agent=agent,
-                    history=runner_history,
-                    tool_registry=tool_registry,
+                    runner_history=runner_history,
                     hooks=run_hooks,
                     session_id=session_id,
-                    checkpoint_manager=checkpoint_manager,
                 )
             )
             answer = run_result["answer"]
-            history.append({
-                "role": "assistant",
-                "content": answer,
-            })
-            session_manager.save(session_id, history)
-            _record_session_memory(session_id, req.message, answer)
+            _persist_assistant_turn(session_id, history, req.message, answer)
 
             await channel.publish({
                 "event": "final_answer",
