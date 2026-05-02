@@ -1,0 +1,96 @@
+from collections.abc import Callable
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+
+from app.core.sse import EventSourceResponse
+from app.a2a.schemas import (
+    A2A_PROTOCOL_VERSION,
+    AgentCard,
+    ListTasksResponse,
+    SendMessageRequest,
+    SendMessageResponse,
+    Task,
+    TaskState,
+)
+from app.a2a.service import A2AService, A2AServiceError
+
+
+def build_a2a_router(
+    agent_card_provider: Callable[[], AgentCard],
+    service: A2AService | None = None,
+) -> APIRouter:
+    router = APIRouter(tags=["A2A"])
+
+    @router.get("/.well-known/agent-card.json", response_model=AgentCard)
+    def get_agent_card() -> AgentCard:
+        return agent_card_provider()
+
+    @router.get("/a2a/v1", include_in_schema=False)
+    def get_a2a_interface_root() -> dict[str, str]:
+        return {
+            "message": "A2A interface reserved for message and task endpoints.",
+            "protocolVersion": A2A_PROTOCOL_VERSION,
+        }
+
+    def raise_service_error(error: A2AServiceError) -> None:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail={
+                "code": error.error_code,
+                "message": error.message,
+            },
+        )
+
+    if service is None:
+        return router
+
+    @router.post(
+        "/a2a/v1/message:send",
+        response_model=SendMessageResponse,
+    )
+    def send_message(
+        request: SendMessageRequest,
+        background_tasks: BackgroundTasks,
+    ) -> SendMessageResponse:
+        try:
+            return service.send_message(
+                request,
+                background_tasks=background_tasks,
+            )
+        except A2AServiceError as e:
+            raise_service_error(e)
+
+    @router.post("/a2a/v1/message:stream", response_class=EventSourceResponse)
+    async def stream_message(request: SendMessageRequest):
+        return EventSourceResponse(service.stream_message(request))
+
+    @router.get("/a2a/v1/tasks/{task_id}", response_model=Task)
+    def get_task(
+        task_id: str,
+        history_length: int | None = Query(default=None, alias="historyLength"),
+    ) -> Task:
+        try:
+            return service.get_task(
+                task_id,
+                history_length=history_length,
+            )
+        except A2AServiceError as e:
+            raise_service_error(e)
+
+    @router.get("/a2a/v1/tasks", response_model=ListTasksResponse)
+    def list_tasks(
+        context_id: str | None = Query(default=None, alias="contextId"),
+        state: TaskState | None = Query(default=None),
+        page_size: int = Query(default=50, alias="pageSize", ge=1, le=100),
+        page_token: str = Query(default="", alias="pageToken"),
+        history_length: int | None = Query(default=None, alias="historyLength"),
+    ) -> ListTasksResponse:
+        return service.list_tasks(
+            context_id=context_id,
+            state=state,
+            page_size=page_size,
+            page_token=page_token,
+            history_length=history_length,
+        )
+
+    return router

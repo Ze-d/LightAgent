@@ -2,17 +2,24 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
-from fastapi.sse import EventSourceResponse
 from openai import OpenAI
 
 from app.agents.tool_aware_agent import ToolAwareAgent
 from app.configs.config import (
+    A2A_AGENT_VERSION,
+    A2A_PUBLIC_URL,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_MODEL_ID,
     LLM_TIMEOUT,
     MAX_STEPS,
 )
+from app.a2a import build_a2a_router, build_agent_card
+from app.a2a.adapter import A2AProtocolAdapter
+from app.a2a.schemas import Message as A2AMessage
+from app.a2a.service import A2AService
+from app.a2a.task_store import InMemoryA2ATaskStore
+from app.core.sse import EventSourceResponse
 from app.core.hooks import CompositeRunnerHooks
 from app.core.middleware import CompositeRunnerMiddleware
 from app.hooks.logging_hooks import LoggingHooks
@@ -101,10 +108,18 @@ skill_registry = build_default_skills()
 skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)
 runner.skill_dispatcher = skill_dispatcher
 mcp_registry = MCPToolRegistry(tool_registry)
+a2a_adapter = A2AProtocolAdapter()
+a2a_task_store = InMemoryA2ATaskStore()
 
 
-
-
+def _build_a2a_agent_card():
+    return build_agent_card(
+        public_base_url=A2A_PUBLIC_URL,
+        agent_name="chat-agent",
+        version=A2A_AGENT_VERSION,
+        skill_registry=skill_registry,
+        tool_registry=tool_registry,
+    )
 
 
 @app.get("/")
@@ -275,6 +290,51 @@ def _last_user_message(history: list[ChatMessage]) -> str:
         if message.get("role") == "user":
             return message.get("content", "")
     return ""
+
+
+def _load_or_create_a2a_session(context_id: str) -> list[ChatMessage]:
+    history = session_manager.load(context_id)
+    if history is not None:
+        return _strip_memory_messages(history)
+
+    history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    session_manager.save(context_id, history)
+    logger.debug("api event=a2a_session_created context_id=%s", context_id)
+    return list(history)
+
+
+def _run_a2a_turn(message: A2AMessage, context_id: str) -> AgentRunResult:
+    user_message = a2a_adapter.extract_text(message)
+    history = _load_or_create_a2a_session(context_id)
+    agent = _build_chat_agent()
+    _discard_stale_checkpoint(context_id)
+    _append_user_turn(context_id, history, user_message)
+    runner_history = _build_runner_history(history, context_id)
+    run_result = _run_agent(
+        agent=agent,
+        runner_history=runner_history,
+        session_id=context_id,
+    )
+    _persist_assistant_turn(
+        session_id=context_id,
+        history=history,
+        user_message=user_message,
+        answer=run_result["answer"],
+    )
+    return run_result
+
+
+a2a_service = A2AService(
+    task_store=a2a_task_store,
+    adapter=a2a_adapter,
+    run_turn=_run_a2a_turn,
+)
+app.include_router(
+    build_a2a_router(
+        agent_card_provider=_build_a2a_agent_card,
+        service=a2a_service,
+    )
+)
 
 
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
