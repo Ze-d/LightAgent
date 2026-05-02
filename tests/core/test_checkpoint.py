@@ -1,4 +1,4 @@
-from app.core.checkpoint import CheckpointManager, Checkpoint
+from app.core.checkpoint import CheckpointManager, Checkpoint, ToolExecutionRecord
 
 
 def test_save_and_load_checkpoint():
@@ -110,3 +110,43 @@ def test_agent_state_is_copied():
 
     checkpoint2 = manager.load(session_id)
     assert len(checkpoint2.agent_state["tool_event_history"]) == 1
+
+
+def test_save_records_checkpoint_phase_and_tool_outputs():
+    manager = CheckpointManager()
+    session_id = "test-session-8"
+    tool_record = ToolExecutionRecord(
+        call_id="call_1",
+        tool_name="calculator",
+        arguments={"expression": "2 + 3"},
+        arguments_hash="hash",
+        status="succeeded",
+        output="5",
+    )
+    output = {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "5",
+    }
+
+    manager.save(
+        session_id,
+        step=1,
+        history=[output],
+        agent_state={},
+        phase="tool_output_ready",
+        llm_input=[output],
+        tool_calls=[tool_record],
+        function_outputs=[output],
+        run_id="run-1",
+    )
+
+    checkpoint = manager.load(session_id)
+    assert checkpoint.phase == "tool_output_ready"
+    assert checkpoint.run_id == "run-1"
+    assert checkpoint.function_outputs == [output]
+    assert checkpoint.completed_call_ids == ["call_1"]
+
+    checkpoint.tool_calls[0].output = "modified"
+    checkpoint2 = manager.load(session_id)
+    assert checkpoint2.tool_calls[0].output == "5"

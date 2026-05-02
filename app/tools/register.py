@@ -88,6 +88,7 @@ def build_default_registry() -> ToolRegistry:
         ),
         model_cls=MemoryAppendSessionSummaryInput,
         handler=memory_append_session_summary,
+        side_effect_policy="non_idempotent",
     ))
 
     return registry

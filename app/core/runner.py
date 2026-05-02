@@ -1,7 +1,11 @@
-import json
 import asyncio
+import hashlib
+import json
 import time
+from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from openai import OpenAI
 
@@ -27,7 +31,12 @@ from app.core.resilience import (
 )
 from app.core.rate_limiter import TokenRateLimiter
 from app.core.tracing import get_tracer, AgentSpan
-from app.core.checkpoint import CheckpointManager
+from app.core.checkpoint import (
+    Checkpoint,
+    CheckpointManager,
+    CheckpointPhase,
+    ToolExecutionRecord,
+)
 from app.core.skill_dispatcher import SkillDispatcher
 
 DEFAULT_LLM_TIMEOUT = 30.0
@@ -326,185 +335,154 @@ class AgentRunner:
         if span:
             span.start_tool_span(tool_name, preview_args)
 
-        # Start events are observer-only; final tool_events keep their
-        # historical success/error-only shape.
         if hooks:
             hooks.on_tool_start({
                 "agent_name": agent.name,
                 "step": step,
+                "call_id": call_id,
                 "tool_name": tool_name,
                 "arguments": preview_args,
                 "status": "start",
             })
 
-        try:
-            tool_args = json.loads(fc.arguments)
-            tool_context: dict = {
-                "agent_name": agent.name,
-                "step": step,
-                "tool_name": tool_name,
-                "arguments": tool_args,
-            }
-
-            try:
-                if self.middleware:
-                    # before_tool may abort, but its returned context is not a
-                    # supported mutation point for the actual tool arguments.
-                    self.middleware.before_tool(tool_context)
-            except MiddlewareAbort as e:
-                if span:
-                    span.end_current_span()
-                logger.warning(
-                    "runner event=tool_error agent=%s step=%s tool=%s "
-                    "status=%s error_type=%s",
-                    agent.name,
-                    step,
-                    tool_name,
-                    "middleware_abort",
-                    type(e).__name__,
-                )
-                error_event: ToolCallEvent = {
-                    "agent_name": agent.name,
-                    "step": step,
-                    "tool_name": tool_name,
-                    "arguments": tool_args,
-                    "status": "error",
-                    "error": e.message,
-                }
-                collected_events.append(error_event)
-                if hooks:
-                    hooks.on_tool_end(error_event)
-                agent.on_tool_event(error_event)
-                result = e.message
-        except json.JSONDecodeError:
+        def finish_error(
+            result: str,
+            event_error: str,
+            arguments: dict[str, Any],
+            status: str,
+            error: Exception | None = None,
+        ) -> FunctionCallOutput:
             if span:
-                span.end_current_span()
+                if error:
+                    span.end_current_span(error=error)
+                else:
+                    span.end_current_span()
             logger.warning(
                 "runner event=tool_error agent=%s step=%s tool=%s "
                 "status=%s error_type=%s",
                 agent.name,
                 step,
                 tool_name,
-                "invalid_arguments",
-                "JSONDecodeError",
+                status,
+                type(error).__name__ if error else status,
             )
-            result = "工具参数解析失败。"
-        else:
-            cb = self._get_tool_circuit_breaker(tool_name)
+            tool_event: ToolCallEvent = {
+                "agent_name": agent.name,
+                "step": step,
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "status": "error",
+                "error": event_error,
+            }
+            collected_events.append(tool_event)
+            agent.on_tool_event(tool_event)
+            if hooks:
+                hooks.on_tool_end(tool_event)
+            return {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result,
+            }
 
-            def tool_call() -> str:
-                if tool_registry.is_async(tool_name):
-                    return asyncio.run(
-                        tool_registry.call_async(tool_name, **tool_args)
-                    )
-                return tool_registry.call(tool_name, **tool_args)
+        try:
+            tool_args = json.loads(fc.arguments)
+        except json.JSONDecodeError as e:
+            return finish_error(
+                result="工具参数解析失败。",
+                event_error="工具参数解析失败。",
+                arguments={},
+                status="invalid_arguments",
+                error=e,
+            )
 
-            try:
-                if cb.state == CircuitBreaker.OPEN:
-                    raise CircuitBreakerOpenError(
-                        f"Circuit breaker open for tool: {tool_name}"
-                    )
-                result = cb.call(with_timeout, tool_call, 10.0)
-            except CircuitBreakerOpenError as e:
-                if span:
-                    span.end_current_span(error=e)
-                result = f"工具暂时不可用（熔断器打开）：{e}"
-                logger.warning(
-                    "runner event=tool_error agent=%s step=%s tool=%s "
-                    "status=%s error_type=%s",
-                    agent.name,
-                    step,
-                    tool_name,
-                    "circuit_breaker_open",
-                    type(e).__name__,
+        tool_context: dict = {
+            "agent_name": agent.name,
+            "step": step,
+            "tool_name": tool_name,
+            "arguments": tool_args,
+        }
+
+        try:
+            if self.middleware:
+                # before_tool may abort, but its returned context is not a
+                # supported mutation point for the actual tool arguments.
+                self.middleware.before_tool(tool_context)
+        except MiddlewareAbort as e:
+            return finish_error(
+                result=e.message,
+                event_error=e.message,
+                arguments=tool_args,
+                status="middleware_abort",
+                error=e,
+            )
+
+        cb = self._get_tool_circuit_breaker(tool_name)
+
+        def tool_call() -> str:
+            if tool_registry.is_async(tool_name):
+                return asyncio.run(
+                    tool_registry.call_async(tool_name, **tool_args)
                 )
-                tool_event: ToolCallEvent = {
-                    "agent_name": agent.name,
-                    "step": step,
-                    "tool_name": tool_name,
-                    "arguments": tool_args,
-                    "status": "error",
-                    "error": str(e),
-                }
-                collected_events.append(tool_event)
-                agent.on_tool_event(tool_event)
-                if hooks:
-                    hooks.on_tool_end(tool_event)
-            except ToolTimeoutError:
-                cb.record_failure()
-                if span:
-                    span.end_current_span(error=ToolTimeoutError("Tool call timed out"))
-                result = f"工具执行超时（10s）：{tool_name}"
-                logger.warning(
-                    "runner event=tool_error agent=%s step=%s tool=%s "
-                    "status=%s error_type=%s",
-                    agent.name,
-                    step,
-                    tool_name,
-                    "timeout",
-                    "TimeoutError",
+            return tool_registry.call(tool_name, **tool_args)
+
+        try:
+            if cb.state == CircuitBreaker.OPEN:
+                raise CircuitBreakerOpenError(
+                    f"Circuit breaker open for tool: {tool_name}"
                 )
-                tool_event = {
-                    "agent_name": agent.name,
-                    "step": step,
-                    "tool_name": tool_name,
-                    "arguments": tool_args,
-                    "status": "error",
-                    "error": result,
-                }
-                collected_events.append(tool_event)
-                agent.on_tool_event(tool_event)
-                if hooks:
-                    hooks.on_tool_end(tool_event)
-            except Exception as e:
-                cb.record_failure()
-                if span:
-                    span.end_current_span(error=e)
-                result = f"工具执行失败：{e}"
-                logger.warning(
-                    "runner event=tool_error agent=%s step=%s tool=%s "
-                    "status=%s error_type=%s",
-                    agent.name,
-                    step,
-                    tool_name,
-                    "exception",
-                    type(e).__name__,
-                )
-                tool_event = {
-                    "agent_name": agent.name,
-                    "step": step,
-                    "tool_name": tool_name,
-                    "arguments": tool_args,
-                    "status": "error",
-                    "error": str(e),
-                }
-                collected_events.append(tool_event)
-                agent.on_tool_event(tool_event)
-                if hooks:
-                    hooks.on_tool_end(tool_event)
-            else:
-                if span:
-                    span.end_current_span()
-                logger.info(
-                    "runner event=tool_success agent=%s step=%s tool=%s "
-                    "result_chars=%s",
-                    agent.name,
-                    step,
-                    tool_name,
-                    len(str(result)),
-                )
-                tool_event = {
-                    "agent_name": agent.name,
-                    "step": step,
-                    "tool_name": tool_name,
-                    "arguments": tool_args,
-                    "status": "success",
-                    "result": result,
-                }
-                collected_events.append(tool_event)
-                agent.on_tool_event(tool_event)
-                if hooks:
-                    hooks.on_tool_end(tool_event)
+            result = cb.call(with_timeout, tool_call, 10.0)
+        except CircuitBreakerOpenError as e:
+            result = f"工具暂时不可用（熔断器打开）：{e}"
+            return finish_error(
+                result=result,
+                event_error=str(e),
+                arguments=tool_args,
+                status="circuit_breaker_open",
+                error=e,
+            )
+        except ToolTimeoutError as e:
+            result = f"工具执行超时（10s）：{tool_name}"
+            return finish_error(
+                result=result,
+                event_error=result,
+                arguments=tool_args,
+                status="timeout",
+                error=e,
+            )
+        except Exception as e:
+            result = f"工具执行失败：{e}"
+            return finish_error(
+                result=result,
+                event_error=str(e),
+                arguments=tool_args,
+                status="exception",
+                error=e,
+            )
+
+        if span:
+            span.end_current_span()
+        logger.info(
+            "runner event=tool_success agent=%s step=%s tool=%s "
+            "result_chars=%s",
+            agent.name,
+            step,
+            tool_name,
+            len(str(result)),
+        )
+        tool_event: ToolCallEvent = {
+            "agent_name": agent.name,
+            "step": step,
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "arguments": tool_args,
+            "status": "success",
+            "result": result,
+        }
+        collected_events.append(tool_event)
+        agent.on_tool_event(tool_event)
+        if hooks:
+            hooks.on_tool_end(tool_event)
 
         return {
             "type": "function_call_output",
@@ -512,29 +490,217 @@ class AgentRunner:
             "output": result,
         }
 
+    def _history_from_input(
+        self,
+        current_input: list[dict[str, Any]] | str,
+    ) -> list[dict[str, Any]]:
+        if isinstance(current_input, list):
+            return deepcopy(current_input)
+        return [{"role": "user", "content": current_input}]
+
+    def _hash_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        payload = json.dumps(
+            {"tool_name": tool_name, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _build_tool_records(
+        self,
+        function_calls: list[Any],
+        tool_registry: ToolRegistry,
+        run_id: str,
+    ) -> list[ToolExecutionRecord]:
+        records: list[ToolExecutionRecord] = []
+        for fc in function_calls:
+            try:
+                arguments = json.loads(fc.arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+            if hasattr(tool_registry, "get_side_effect_policy"):
+                side_effect_policy = tool_registry.get_side_effect_policy(fc.name)
+            else:
+                side_effect_policy = "read_only"
+            records.append(
+                ToolExecutionRecord(
+                    call_id=fc.call_id,
+                    tool_name=fc.name,
+                    arguments=arguments,
+                    arguments_hash=self._hash_tool_arguments(fc.name, arguments),
+                    side_effect_policy=side_effect_policy,
+                    idempotency_key=f"{run_id}:{fc.call_id}",
+                )
+            )
+        return records
+
     def _save_checkpoint(
         self,
         checkpoint_manager: CheckpointManager | None,
         session_id: str | None,
         step: int,
-        current_input: list[FunctionCallOutput],
+        phase: CheckpointPhase,
+        current_input: list[dict[str, Any]] | str,
         agent: BaseAgent,
+        run_id: str,
+        tool_calls: list[ToolExecutionRecord] | None = None,
+        function_outputs: list[FunctionCallOutput] | None = None,
+        error: str | None = None,
     ) -> None:
-        """Persist the next model input after a tool round completes."""
+        """Persist the run state needed to continue the current turn."""
         if checkpoint_manager and session_id:
+            history_source: list[dict[str, Any]] | str = (
+                function_outputs if function_outputs is not None else current_input
+            )
             checkpoint_manager.save(
                 session_id=session_id,
                 step=step,
-                history=list(current_input),
+                history=self._history_from_input(history_source),
                 agent_state=agent.get_state(),
+                phase=phase,
+                llm_input=deepcopy(current_input),
+                tool_calls=deepcopy(tool_calls or []),
+                function_outputs=deepcopy(function_outputs or []),
+                run_id=run_id,
+                error=error,
             )
             logger.debug(
-                "runner event=checkpoint_save session_id=%s step=%s "
-                "history_length=%s",
+                "runner event=checkpoint_save session_id=%s step=%s phase=%s "
+                "history_length=%s tool_calls=%s function_outputs=%s",
                 session_id,
                 step,
-                len(current_input),
+                phase,
+                len(self._history_from_input(history_source)),
+                len(tool_calls or []),
+                len(function_outputs or []),
             )
+
+    def _record_to_function_output(
+        self,
+        record: ToolExecutionRecord,
+    ) -> FunctionCallOutput:
+        output = record.output
+        if output is None:
+            output = record.error or "工具执行状态未知，未获得可恢复结果。"
+        return {
+            "type": "function_call_output",
+            "call_id": record.call_id,
+            "output": output,
+        }
+
+    def _is_tool_record_complete(self, record: ToolExecutionRecord) -> bool:
+        return record.status in {"succeeded", "failed"} and record.output is not None
+
+    def _execute_tool_records(
+        self,
+        agent: BaseAgent,
+        tool_registry: ToolRegistry,
+        hooks: BaseRunnerHooks | None,
+        span: AgentSpan | None,
+        collected_events: list[ToolCallEvent],
+        step: int,
+        current_input: list[dict[str, Any]] | str,
+        tool_records: list[ToolExecutionRecord],
+        checkpoint_manager: CheckpointManager | None,
+        session_id: str | None,
+        run_id: str,
+    ) -> tuple[list[FunctionCallOutput], ToolExecutionRecord | None]:
+        """Execute pending tool records and checkpoint every stable result."""
+        function_outputs: list[FunctionCallOutput] = []
+
+        for record in tool_records:
+            if self._is_tool_record_complete(record):
+                function_outputs.append(self._record_to_function_output(record))
+                continue
+
+            if (
+                record.status in {"running", "unknown"}
+                and record.side_effect_policy == "non_idempotent"
+            ):
+                self._save_checkpoint(
+                    checkpoint_manager=checkpoint_manager,
+                    session_id=session_id,
+                    step=step,
+                    phase="tool_partial_done",
+                    current_input=current_input,
+                    agent=agent,
+                    run_id=run_id,
+                    tool_calls=tool_records,
+                    function_outputs=function_outputs,
+                    error="non_idempotent_tool_state_unknown",
+                )
+                return function_outputs, record
+
+            record.status = "running"
+            self._save_checkpoint(
+                checkpoint_manager=checkpoint_manager,
+                session_id=session_id,
+                step=step,
+                phase="tool_partial_done",
+                current_input=current_input,
+                agent=agent,
+                run_id=run_id,
+                tool_calls=tool_records,
+                function_outputs=function_outputs,
+            )
+
+            fc = SimpleNamespace(
+                type="function_call",
+                name=record.tool_name,
+                arguments=json.dumps(record.arguments, ensure_ascii=False),
+                call_id=record.call_id,
+            )
+            event_count = len(collected_events)
+            output = self._execute_tool_call(
+                agent=agent,
+                tool_registry=tool_registry,
+                hooks=hooks,
+                span=span,
+                collected_events=collected_events,
+                step=step,
+                fc=fc,
+            )
+            function_outputs.append(output)
+            record.output = output["output"]
+
+            latest_event = (
+                collected_events[-1]
+                if len(collected_events) > event_count
+                else None
+            )
+            if latest_event and latest_event.get("status") == "error":
+                record.status = "failed"
+                record.error = latest_event.get("error")
+            else:
+                record.status = "succeeded"
+                record.error = None
+
+            phase: CheckpointPhase = (
+                "tool_output_ready"
+                if all(self._is_tool_record_complete(item) for item in tool_records)
+                else "tool_partial_done"
+            )
+            next_llm_input: list[dict[str, Any]] | str = (
+                function_outputs if phase == "tool_output_ready" else current_input
+            )
+            self._save_checkpoint(
+                checkpoint_manager=checkpoint_manager,
+                session_id=session_id,
+                step=step,
+                phase=phase,
+                current_input=next_llm_input,
+                agent=agent,
+                run_id=run_id,
+                tool_calls=tool_records,
+                function_outputs=function_outputs,
+            )
+
+        return function_outputs, None
 
     def run(
         self,
@@ -544,6 +710,7 @@ class AgentRunner:
         hooks: BaseRunnerHooks | None = None,
         session_id: str | None = None,
         checkpoint_manager: CheckpointManager | None = None,
+        resume_checkpoint: Checkpoint | None = None,
     ) -> AgentRunResult:
         """Execute one agent turn.
 
@@ -569,22 +736,59 @@ class AgentRunner:
 
         current_input: list[dict] | str = history
         collected_events: list[ToolCallEvent] = []
+        start_step = 1
+        run_id = str(uuid4())
+        resume_tool_records: list[ToolExecutionRecord] | None = None
+
+        if resume_checkpoint is not None:
+            run_id = resume_checkpoint.run_id or run_id
+            agent.restore_state(resume_checkpoint.agent_state)
+            restored_tool_events = agent.get_state().get("tool_event_history", [])
+            if isinstance(restored_tool_events, list):
+                collected_events = list(restored_tool_events)
+
+            checkpoint_input = (
+                resume_checkpoint.llm_input
+                if resume_checkpoint.llm_input is not None
+                else resume_checkpoint.history
+            )
+            current_input = checkpoint_input
+            start_step = max(resume_checkpoint.step, 1)
+            if resume_checkpoint.phase in {"tool_requested", "tool_partial_done"}:
+                resume_tool_records = deepcopy(resume_checkpoint.tool_calls)
+            elif resume_checkpoint.phase == "tool_output_ready":
+                current_input = (
+                    list(resume_checkpoint.function_outputs)
+                    if resume_checkpoint.function_outputs
+                    else list(resume_checkpoint.history)
+                )
+                start_step = min(resume_checkpoint.step + 1, self.max_steps + 1)
+            elif resume_checkpoint.phase in {"completed", "failed"}:
+                start_step = self.max_steps + 1
+
         tools = self._resolve_tools(agent, tool_registry)
         logger.info(
             "runner event=run_start agent=%s session_id=%s model=%s "
-            "history_length=%s max_steps=%s tools_count=%s",
+            "history_length=%s max_steps=%s tools_count=%s resume=%s "
+            "start_step=%s",
             agent.name,
             session_id or "",
             agent.model,
             len(history),
             self.max_steps,
             len(tools),
+            resume_checkpoint is not None,
+            start_step,
         )
         # Tracing is owned by the runner so hook implementations can remain
         # lightweight observers rather than mandatory tracing adapters.
         span = self._start_run_span(tracer, agent)
 
-        invoked, skill_result = self._try_invoke_skill(agent, history)
+        invoked, skill_result = (
+            (False, None)
+            if resume_checkpoint is not None
+            else self._try_invoke_skill(agent, history)
+        )
         if invoked:
             if span:
                 span.end_all()
@@ -604,7 +808,7 @@ class AgentRunner:
             )
 
         try:
-            for step in range(1, self.max_steps + 1):
+            for step in range(start_step, self.max_steps + 1):
                 last_step = step
                 logger.info(
                     "runner event=step_start agent=%s session_id=%s step=%s "
@@ -616,6 +820,62 @@ class AgentRunner:
                 )
                 if span:
                     span.start_step_span(step)
+
+                if resume_tool_records is not None:
+                    if tool_registry is None:
+                        if span:
+                            span.end_all()
+                        return self._finish_run(
+                            effective_hooks,
+                            agent,
+                            self._build_result(
+                                answer="恢复需要工具注册中心，但当前未配置。",
+                                success=False,
+                                steps=step,
+                                tool_events=collected_events,
+                                error="missing_tool_registry",
+                            ),
+                            run_started_at,
+                            session_id,
+                        )
+
+                    next_input, blocked_record = self._execute_tool_records(
+                        agent=agent,
+                        tool_registry=tool_registry,
+                        hooks=effective_hooks,
+                        span=span,
+                        collected_events=collected_events,
+                        step=step,
+                        current_input=current_input,
+                        tool_records=resume_tool_records,
+                        checkpoint_manager=checkpoint_manager,
+                        session_id=session_id,
+                        run_id=run_id,
+                    )
+                    resume_tool_records = None
+                    if blocked_record is not None:
+                        if span:
+                            span.end_all()
+                        return self._finish_run(
+                            effective_hooks,
+                            agent,
+                            self._build_result(
+                                answer=(
+                                    "检测到工具可能已经执行，但结果未确认。"
+                                    f"工具 {blocked_record.tool_name} 可能有副作用，"
+                                    "已暂停自动恢复以避免重复调用。"
+                                ),
+                                success=False,
+                                steps=step,
+                                tool_events=collected_events,
+                                error="tool_requires_manual_resume",
+                            ),
+                            run_started_at,
+                            session_id,
+                        )
+
+                    current_input = next_input
+                    continue
 
                 if effective_hooks:
                     effective_hooks.on_llm_start({
@@ -650,6 +910,16 @@ class AgentRunner:
                         session_id,
                     )
 
+                self._save_checkpoint(
+                    checkpoint_manager=checkpoint_manager,
+                    session_id=session_id,
+                    step=step,
+                    phase="before_llm",
+                    current_input=current_input,
+                    agent=agent,
+                    run_id=run_id,
+                )
+
                 if span:
                     span.start_llm_span(len(current_input))
 
@@ -666,7 +936,6 @@ class AgentRunner:
                     if span:
                         span.end_current_span()
                         span.end_all()
-                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return self._finish_run(
                         effective_hooks,
                         agent,
@@ -683,7 +952,6 @@ class AgentRunner:
                 except ToolTimeoutError:
                     if span:
                         span.end_all()
-                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return self._finish_run(
                         effective_hooks,
                         agent,
@@ -700,7 +968,6 @@ class AgentRunner:
                 except RateLimitError:
                     if span:
                         span.end_all()
-                    self._clear_checkpoint(checkpoint_manager, session_id)
                     return self._finish_run(
                         effective_hooks,
                         agent,
@@ -762,27 +1029,56 @@ class AgentRunner:
                         session_id,
                     )
 
-                next_input = [
-                    self._execute_tool_call(
-                        agent=agent,
-                        tool_registry=tool_registry,
-                        hooks=effective_hooks,
-                        span=span,
-                        collected_events=collected_events,
-                        step=step,
-                        fc=fc,
-                    )
-                    for fc in function_calls
-                ]
-
-                current_input = next_input
-                self._save_checkpoint(
-                    checkpoint_manager,
-                    session_id,
-                    step,
-                    next_input,
-                    agent,
+                tool_records = self._build_tool_records(
+                    function_calls=function_calls,
+                    tool_registry=tool_registry,
+                    run_id=run_id,
                 )
+                self._save_checkpoint(
+                    checkpoint_manager=checkpoint_manager,
+                    session_id=session_id,
+                    step=step,
+                    phase="tool_requested",
+                    current_input=current_input,
+                    agent=agent,
+                    run_id=run_id,
+                    tool_calls=tool_records,
+                )
+
+                next_input, blocked_record = self._execute_tool_records(
+                    agent=agent,
+                    tool_registry=tool_registry,
+                    hooks=effective_hooks,
+                    span=span,
+                    collected_events=collected_events,
+                    step=step,
+                    current_input=current_input,
+                    tool_records=tool_records,
+                    checkpoint_manager=checkpoint_manager,
+                    session_id=session_id,
+                    run_id=run_id,
+                )
+                if blocked_record is not None:
+                    if span:
+                        span.end_all()
+                    return self._finish_run(
+                        effective_hooks,
+                        agent,
+                        self._build_result(
+                            answer=(
+                                "检测到工具可能已经执行，但结果未确认。"
+                                f"工具 {blocked_record.tool_name} 可能有副作用，"
+                                "已暂停自动恢复以避免重复调用。"
+                            ),
+                            success=False,
+                            steps=step,
+                            tool_events=collected_events,
+                            error="tool_requires_manual_resume",
+                        ),
+                        run_started_at,
+                        session_id,
+                    )
+                current_input = next_input
 
             if span:
                 span.end_all()

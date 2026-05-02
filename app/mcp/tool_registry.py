@@ -62,6 +62,7 @@ class MCPToolRegistry:
             description=description,
             parameters=parameters,
             handler=handler,
+            side_effect_policy="non_idempotent",
         )
 
     def _get_cb(self, client_name: str) -> CircuitBreaker:
@@ -109,6 +110,11 @@ class MCPToolRegistry:
         if ":" in name:
             return True
         return self._inner.is_async(name)
+
+    def get_side_effect_policy(self, name: str):
+        if ":" in name:
+            return "non_idempotent"
+        return self._inner.get_side_effect_policy(name)
 
     def list_names(self) -> list[str]:
         return self._inner.list_names()

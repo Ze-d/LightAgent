@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.agents.chat_agent import ChatAgent
-from app.core.checkpoint import CheckpointManager
+from app.core.checkpoint import Checkpoint, CheckpointManager, ToolExecutionRecord
 from app.core.hooks import BaseRunnerHooks
 from app.core.runner import AgentRunner
+from app.core.tool_registry import ToolRegistry
 from app.tools.register import build_default_registry
 
 
@@ -28,6 +31,11 @@ class RecordingHooks(BaseRunnerHooks):
 
     def on_tool_end(self, event):
         self.events.append(("tool_end", dict(event)))
+
+
+def _count_tool_call(counter: dict[str, int]) -> str:
+    counter["count"] += 1
+    return f"called-{counter['count']}"
 
 
 def test_runner_returns_structured_result(monkeypatch):
@@ -103,6 +111,228 @@ def test_runner_clears_checkpoint_on_success(monkeypatch):
 
     assert result["success"] is True
     assert checkpoint_manager.load(session_id) is None
+
+
+def test_runner_clears_checkpoint_when_llm_returns_no_tool_calls():
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+    fake_client.responses.create = lambda *args, **kwargs: SimpleNamespace(
+        output=[],
+        output_text="final without tools",
+    )
+
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+    checkpoint_manager = CheckpointManager()
+    session_id = "no-tool-final"
+
+    result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "hello"}],
+        tool_registry=None,
+        session_id=session_id,
+        checkpoint_manager=checkpoint_manager,
+    )
+
+    assert result["success"] is True
+    assert result["answer"] == "final without tools"
+    assert result["tool_events"] == []
+    assert checkpoint_manager.load(session_id) is None
+
+
+def test_runner_resumes_tool_output_without_repeating_tool(monkeypatch):
+    tool_calls = {"count": 0}
+    registry = ToolRegistry()
+    registry.register({
+        "name": "side_effect_tool",
+        "description": "A tool whose result must not be duplicated.",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": lambda: _count_tool_call(tool_calls),
+        "side_effect_policy": "non_idempotent",
+    })
+
+    function_call_item = SimpleNamespace(
+        type="function_call",
+        name="side_effect_tool",
+        arguments="{}",
+        call_id="call_1",
+    )
+    first_response = SimpleNamespace(output=[function_call_item], output_text="")
+    final_response = SimpleNamespace(output=[], output_text="done after resume")
+    llm_calls = {"count": 0}
+
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+
+    def fake_create(*args, **kwargs):
+        llm_calls["count"] += 1
+        if llm_calls["count"] == 1:
+            return first_response
+        if llm_calls["count"] == 2:
+            raise RuntimeError("interrupted before model saw tool output")
+        return final_response
+
+    fake_client.responses.create = fake_create
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+    checkpoint_manager = CheckpointManager()
+    session_id = "resume-tool-output"
+
+    with pytest.raises(RuntimeError):
+        runner.run(
+            agent=agent,
+            history=[{"role": "user", "content": "run side effect"}],
+            tool_registry=registry,
+            session_id=session_id,
+            checkpoint_manager=checkpoint_manager,
+        )
+
+    checkpoint = checkpoint_manager.load(session_id)
+    assert checkpoint is not None
+    assert checkpoint.phase == "before_llm"
+    assert tool_calls["count"] == 1
+
+    resumed_result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "run side effect"}],
+        tool_registry=registry,
+        session_id=session_id,
+        checkpoint_manager=checkpoint_manager,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed_result["success"] is True
+    assert resumed_result["answer"] == "done after resume"
+    assert tool_calls["count"] == 1
+    assert checkpoint_manager.load(session_id) is None
+
+
+def test_runner_resumes_tool_requested_checkpoint_by_calling_tool_once():
+    tool_calls = {"count": 0}
+    registry = ToolRegistry()
+    registry.register({
+        "name": "lookup",
+        "description": "Lookup once.",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": lambda: _count_tool_call(tool_calls),
+    })
+
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+    fake_client.responses.create = lambda *args, **kwargs: SimpleNamespace(
+        output=[],
+        output_text="lookup complete",
+    )
+
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+    checkpoint_manager = CheckpointManager()
+    session_id = "resume-tool-requested"
+    checkpoint = Checkpoint(
+        step=1,
+        history=[{"role": "user", "content": "lookup"}],
+        agent_state={},
+        session_id=session_id,
+        run_id="run-1",
+        phase="tool_requested",
+        llm_input=[{"role": "user", "content": "lookup"}],
+        tool_calls=[
+            ToolExecutionRecord(
+                call_id="call_1",
+                tool_name="lookup",
+                arguments={},
+                arguments_hash="hash",
+            )
+        ],
+    )
+    checkpoint_manager.save_checkpoint(session_id, checkpoint)
+
+    result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "lookup"}],
+        tool_registry=registry,
+        session_id=session_id,
+        checkpoint_manager=checkpoint_manager,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert result["success"] is True
+    assert result["answer"] == "lookup complete"
+    assert tool_calls["count"] == 1
+    assert checkpoint_manager.load(session_id) is None
+
+
+def test_runner_does_not_retry_running_non_idempotent_tool():
+    tool_calls = {"count": 0}
+    registry = ToolRegistry()
+    registry.register({
+        "name": "send_email",
+        "description": "Send email.",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": lambda: _count_tool_call(tool_calls),
+        "side_effect_policy": "non_idempotent",
+    })
+
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+    fake_client.responses.create = lambda *args, **kwargs: pytest.fail(
+        "LLM should not be called before unresolved non-idempotent tool"
+    )
+
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+    checkpoint_manager = CheckpointManager()
+    session_id = "resume-non-idempotent-running"
+    checkpoint = Checkpoint(
+        step=1,
+        history=[{"role": "user", "content": "send email"}],
+        agent_state={},
+        session_id=session_id,
+        run_id="run-1",
+        phase="tool_partial_done",
+        llm_input=[{"role": "user", "content": "send email"}],
+        tool_calls=[
+            ToolExecutionRecord(
+                call_id="call_1",
+                tool_name="send_email",
+                arguments={},
+                arguments_hash="hash",
+                status="running",
+                side_effect_policy="non_idempotent",
+            )
+        ],
+    )
+    checkpoint_manager.save_checkpoint(session_id, checkpoint)
+
+    result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "send email"}],
+        tool_registry=registry,
+        session_id=session_id,
+        checkpoint_manager=checkpoint_manager,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "tool_requires_manual_resume"
+    assert tool_calls["count"] == 0
+    assert checkpoint_manager.load(session_id) is not None
 
 
 def test_runner_emits_run_end_on_success(monkeypatch):

@@ -27,7 +27,7 @@ from app.obj.types import AgentRunResult, ChatMessage
 from app.core.runner import AgentRunner
 from app.core.session_manager import BaseSessionManager, InMemorySessionManager
 from app.core.event_channel import EventChannel
-from app.core.checkpoint import CheckpointManager
+from app.core.checkpoint import Checkpoint, CheckpointManager
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
@@ -241,6 +241,7 @@ def _run_agent(
     runner_history: list[ChatMessage],
     session_id: str,
     hooks: CompositeRunnerHooks | None = None,
+    resume_checkpoint: Checkpoint | None = None,
 ) -> AgentRunResult:
     """Call AgentRunner with the app-level registry and checkpoint manager."""
     return runner.run(
@@ -250,6 +251,7 @@ def _run_agent(
         hooks=hooks,
         session_id=session_id,
         checkpoint_manager=checkpoint_manager,
+        resume_checkpoint=resume_checkpoint,
     )
 
 
@@ -266,6 +268,13 @@ def _persist_assistant_turn(
     })
     session_manager.save(session_id, history)
     _record_session_memory(session_id, user_message, answer)
+
+
+def _last_user_message(history: list[ChatMessage]) -> str:
+    for message in reversed(history):
+        if message.get("role") == "user":
+            return message.get("content", "")
+    return ""
 
 
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
@@ -391,6 +400,53 @@ async def chat_stream(req: ChatRequest):
         yield event
 
 
+@app.post("/checkpoint/{session_id}/resume", response_model=ChatResponse)
+def resume_checkpoint(session_id: str) -> ChatResponse:
+    checkpoint = checkpoint_manager.load(session_id)
+    if checkpoint is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No checkpoint found for session: {session_id}",
+        )
+
+    history = _load_session(session_id)
+    runner_history = _build_runner_history(history, session_id)
+    agent = _build_chat_agent()
+
+    try:
+        run_result = _run_agent(
+            agent=agent,
+            runner_history=runner_history,
+            session_id=session_id,
+            resume_checkpoint=checkpoint,
+        )
+    except Exception as e:
+        logger.exception(
+            "api event=checkpoint_resume_failed session_id=%s error_type=%s",
+            session_id,
+            type(e).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Checkpoint resume failed: {e}",
+        )
+
+    answer = run_result["answer"]
+    if run_result["success"]:
+        _persist_assistant_turn(
+            session_id=session_id,
+            history=history,
+            user_message=_last_user_message(history),
+            answer=answer,
+        )
+
+    return ChatResponse(
+        session_id=session_id,
+        answer=answer,
+        history_length=len(history),
+    )
+
+
 @app.get("/checkpoint/{session_id}")
 def get_checkpoint(session_id: str):
     checkpoint = checkpoint_manager.load(session_id)
@@ -401,8 +457,27 @@ def get_checkpoint(session_id: str):
         )
     return {
         "session_id": session_id,
+        "run_id": checkpoint.run_id,
         "step": checkpoint.step,
+        "phase": checkpoint.phase,
         "history_length": len(checkpoint.history),
+        "function_outputs_count": len(checkpoint.function_outputs),
+        "tool_calls": [
+            {
+                "call_id": record.call_id,
+                "tool_name": record.tool_name,
+                "status": record.status,
+                "arguments_hash": record.arguments_hash,
+                "side_effect_policy": record.side_effect_policy,
+            }
+            for record in checkpoint.tool_calls
+        ],
+        "resumable": checkpoint.phase not in {"completed", "failed"},
+        "requires_manual_action": any(
+            record.status in {"running", "unknown"}
+            and record.side_effect_policy == "non_idempotent"
+            for record in checkpoint.tool_calls
+        ),
         "timestamp": checkpoint.timestamp.isoformat(),
     }
 

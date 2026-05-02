@@ -19,13 +19,17 @@ class FunctionCallOutput(TypedDict):
     output: str
 
 
-class ToolSpec(TypedDict):
+SideEffectPolicy = Literal["read_only", "idempotent", "non_idempotent"]
+
+
+class ToolSpec(TypedDict, total=False):
     """Registered tool metadata and executable handler."""
 
     name: str
     description: str
     parameters: dict[str, Any]
     handler: Callable[..., Any]
+    side_effect_policy: SideEffectPolicy
 
 
 class ToolCallEvent(TypedDict, total=False):
@@ -33,6 +37,7 @@ class ToolCallEvent(TypedDict, total=False):
 
     agent_name: str
     step: int
+    call_id: str
     tool_name: str
     arguments: dict[str, Any]
     result: str

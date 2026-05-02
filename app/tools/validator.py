@@ -8,7 +8,7 @@ from typing import Any, get_origin, get_args
 from pydantic import BaseModel, ValidationError
 
 from app.configs.logger import logger
-from app.obj.types import ToolSpec
+from app.obj.types import SideEffectPolicy, ToolSpec
 
 
 def validate_params(model_cls: type[BaseModel]):
@@ -150,6 +150,7 @@ def create_tool_spec(
     description: str,
     model_cls: type[BaseModel],
     handler,
+    side_effect_policy: SideEffectPolicy = "read_only",
 ) -> ToolSpec:  # type: ignore[misc]
     """Create a ToolSpec dict from a Pydantic model and handler.
 
@@ -170,4 +171,5 @@ def create_tool_spec(
         "description": description,
         "parameters": pydantic_to_openai_schema(model_cls),
         "handler": validated_handler,
+        "side_effect_policy": side_effect_policy,
     }
