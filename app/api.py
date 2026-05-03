@@ -36,6 +36,11 @@ from app.obj.schemas import ChatRequest, ChatResponse
 from app.obj.types import AgentRunResult, ChatMessage
 from app.core.runner import AgentRunner
 from app.core.session_manager import BaseSessionManager, InMemorySessionManager
+from app.core.context_state import (
+    BaseContextStore,
+    ContextChannel,
+    InMemoryContextStore,
+)
 from app.core.event_channel import EventChannel
 from app.core.checkpoint import Checkpoint, CheckpointManager
 from app.tools.register import build_default_registry
@@ -104,6 +109,7 @@ runner = AgentRunner(
     middleware=composite_middleware,
 )
 session_manager: BaseSessionManager = InMemorySessionManager()
+context_store: BaseContextStore = InMemoryContextStore()
 checkpoint_manager = CheckpointManager()
 memory_store = DocumentMemoryStore()
 tool_registry = build_default_registry()
@@ -147,6 +153,12 @@ def _build_a2a_extended_agent_card(request_base_url: str):
 @app.get("/")
 async def root():
     return {"message": "Minimal Agent API is running"}
+
+
+def _default_provider() -> str:
+    if "api.openai.com" in LLM_BASE_URL:
+        return "openai"
+    return "openai_compatible"
 
 
 def _strip_memory_messages(history: list[ChatMessage]) -> list[ChatMessage]:
@@ -198,6 +210,11 @@ def _create_session() -> tuple[str, list[ChatMessage]]:
         {"role": "system", "content": SYSTEM_PROMPT}
     ]
     session_id = session_manager.create(history)
+    context_store.create(
+        channel="chat",
+        session_id=session_id,
+        provider=_default_provider(),
+    )
     logger.debug("api event=session_created session_id=%s", session_id)
     return session_id, history
 
@@ -210,7 +227,39 @@ def _load_session(session_id: str) -> list[ChatMessage]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}",
         )
+    _ensure_context_state(session_id, channel="chat")
     return _strip_memory_messages(history)
+
+
+def _ensure_context_state(
+    session_id: str,
+    *,
+    channel: ContextChannel,
+    external_context_id: str | None = None,
+) -> None:
+    """Backfill context state for sessions created before ContextStore existed."""
+    if context_store.get(session_id) is not None:
+        return
+    context_store.create(
+        channel=channel,
+        session_id=session_id,
+        external_context_id=external_context_id,
+        provider=_default_provider(),
+    )
+
+
+def _resolve_context_session_id(session_id: str) -> str:
+    """Resolve public context identifiers to the internal session key."""
+    if session_manager.exists(session_id) or context_store.get(session_id) is not None:
+        return session_id
+
+    a2a_context = context_store.get_by_external_context(
+        channel="a2a",
+        external_context_id=session_id,
+    )
+    if a2a_context is not None:
+        return a2a_context.session_id
+    return session_id
 
 
 def _resolve_session(req: ChatRequest) -> tuple[str, list[ChatMessage], bool]:
@@ -259,6 +308,7 @@ def _append_user_turn(
         "content": message,
     })
     session_manager.save(session_id, history)
+    context_store.bump_history_version(session_id)
 
 
 def _prepare_agent_turn(
@@ -304,6 +354,7 @@ def _persist_assistant_turn(
         "content": answer,
     })
     session_manager.save(session_id, history)
+    context_store.bump_history_version(session_id)
     _record_session_memory(session_id, user_message, answer)
 
 
@@ -314,31 +365,41 @@ def _last_user_message(history: list[ChatMessage]) -> str:
     return ""
 
 
-def _load_or_create_a2a_session(context_id: str) -> list[ChatMessage]:
-    history = session_manager.load(context_id)
+def _load_or_create_a2a_session(context_id: str) -> tuple[str, list[ChatMessage]]:
+    context_state = context_store.get_or_create_for_external_context(
+        channel="a2a",
+        external_context_id=context_id,
+        provider=_default_provider(),
+    )
+    session_id = context_state.session_id
+    history = session_manager.load(session_id)
     if history is not None:
-        return _strip_memory_messages(history)
+        return session_id, _strip_memory_messages(history)
 
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    session_manager.save(context_id, history)
-    logger.debug("api event=a2a_session_created context_id=%s", context_id)
-    return list(history)
+    session_manager.save(session_id, history)
+    logger.debug(
+        "api event=a2a_session_created context_id=%s session_id=%s",
+        context_id,
+        session_id,
+    )
+    return session_id, list(history)
 
 
 def _run_a2a_turn(message: A2AMessage, context_id: str) -> AgentRunResult:
     user_message = a2a_adapter.extract_text(message)
-    history = _load_or_create_a2a_session(context_id)
+    session_id, history = _load_or_create_a2a_session(context_id)
     agent = _build_chat_agent()
-    _discard_stale_checkpoint(context_id)
-    _append_user_turn(context_id, history, user_message)
-    runner_history = _build_runner_history(history, context_id)
+    _discard_stale_checkpoint(session_id)
+    _append_user_turn(session_id, history, user_message)
+    runner_history = _build_runner_history(history, session_id)
     run_result = _run_agent(
         agent=agent,
         runner_history=runner_history,
-        session_id=context_id,
+        session_id=session_id,
     )
     _persist_assistant_turn(
-        session_id=context_id,
+        session_id=session_id,
         history=history,
         user_message=user_message,
         answer=run_result["answer"],
@@ -486,22 +547,23 @@ async def chat_stream(req: ChatRequest):
 
 @app.post("/checkpoint/{session_id}/resume", response_model=ChatResponse)
 def resume_checkpoint(session_id: str) -> ChatResponse:
-    checkpoint = checkpoint_manager.load(session_id)
+    internal_session_id = _resolve_context_session_id(session_id)
+    checkpoint = checkpoint_manager.load(internal_session_id)
     if checkpoint is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No checkpoint found for session: {session_id}",
         )
 
-    history = _load_session(session_id)
-    runner_history = _build_runner_history(history, session_id)
+    history = _load_session(internal_session_id)
+    runner_history = _build_runner_history(history, internal_session_id)
     agent = _build_chat_agent()
 
     try:
         run_result = _run_agent(
             agent=agent,
             runner_history=runner_history,
-            session_id=session_id,
+            session_id=internal_session_id,
             resume_checkpoint=checkpoint,
         )
     except Exception as e:
@@ -518,14 +580,14 @@ def resume_checkpoint(session_id: str) -> ChatResponse:
     answer = run_result["answer"]
     if run_result["success"]:
         _persist_assistant_turn(
-            session_id=session_id,
+            session_id=internal_session_id,
             history=history,
             user_message=_last_user_message(history),
             answer=answer,
         )
 
     return ChatResponse(
-        session_id=session_id,
+        session_id=internal_session_id,
         answer=answer,
         history_length=len(history),
     )
@@ -533,14 +595,15 @@ def resume_checkpoint(session_id: str) -> ChatResponse:
 
 @app.get("/checkpoint/{session_id}")
 def get_checkpoint(session_id: str):
-    checkpoint = checkpoint_manager.load(session_id)
+    internal_session_id = _resolve_context_session_id(session_id)
+    checkpoint = checkpoint_manager.load(internal_session_id)
     if checkpoint is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No checkpoint found for session: {session_id}"
         )
     return {
-        "session_id": session_id,
+        "session_id": internal_session_id,
         "run_id": checkpoint.run_id,
         "step": checkpoint.step,
         "phase": checkpoint.phase,
@@ -568,5 +631,6 @@ def get_checkpoint(session_id: str):
 
 @app.delete("/checkpoint/{session_id}")
 def delete_checkpoint(session_id: str):
-    checkpoint_manager.clear(session_id)
-    return {"message": f"Checkpoint cleared for session: {session_id}"}
+    internal_session_id = _resolve_context_session_id(session_id)
+    checkpoint_manager.clear(internal_session_id)
+    return {"message": f"Checkpoint cleared for session: {internal_session_id}"}
