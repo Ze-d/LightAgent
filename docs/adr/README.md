@@ -13,6 +13,7 @@
 | [ADR-003](ADR-003-DashScope-API.md) | 采用 DashScope API（阿里云）作为 LLM 后端 | Accepted | 2026/04/14 |
 | [ADR-004](ADR-004-SSE-Streaming.md) | 采用 SSE 实现流式响应而非 WebSocket | Accepted | 2026/04/14 |
 | [ADR-005](ADR-005-Single-Process-Architecture.md) | 采用单体架构，暂不分库分表和微服务拆分 | Accepted | 2026/04/14 |
+| [ADR-006](ADR-006-A2A-Protocol-Support.md) | 支持 A2A 协议作为 Agent 间协作边界 | Accepted | 2026/05/03 |
 
 ---
 
@@ -27,6 +28,6 @@
 
 ## 新增 ADR
 
-新增时使用下一可用编号（当前最大为 005）：
+新增时使用下一可用编号（当前最大为 006）：
 - 文件名：`ADR-00X-Title.md`
 - 编号连续递增，不复用旧编号

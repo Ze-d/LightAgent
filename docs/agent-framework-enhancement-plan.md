@@ -1,136 +1,134 @@
-# MyAgent 框架功能扩展计划 —— 面向 Agent 开发面试
+# MyAgent 框架功能扩展计划
 
 ## Context
 
-MyAgent 是一个 Python Agent 开发框架，已实现核心组件：
-- Agent 体系：BaseAgent → ChatAgent → ToolAwareAgent
-- AgentRunner 执行引擎、ToolRegistry、Hooks、Middleware
-- InMemorySessionManager、EventChannel (SSE)
+MyAgent 是一个 Python Agent 运行时框架，已实现：
 
-**现有缺陷**：无记忆系统、无多 Agent 协作、无可观测性、安全层薄弱（calculator 用 eval）、无生产级韧性（超时/重试/限流/熔断）。
+- Agent 体系：`BaseAgent` → `ChatAgent` → `ToolAwareAgent`
+- 协议无关执行引擎：`AgentRunner`
+- 本地工具注册、Pydantic 参数校验、异步工具支持
+- MCP 工具接入
+- A2A Server/Client/Task/Streaming/Agent Card/Tool Bridge
+- Session、Memory、Checkpoint
+- Hooks、Middleware、SSE
+- OpenTelemetry、限流、超时、重试、熔断
+- 输入安全过滤和工具沙箱
 
 ---
 
-## 推荐扩展方向（按优先级）
+## 已完成能力
 
-### P0 —— 立即修复/实现
+| 能力 | 状态 | 关键文件 |
+|------|------|------|
+| 工具沙箱 | 已实现 | `app/tools/sandbox.py` |
+| Pydantic 工具参数校验 | 已实现 | `app/tools/validator.py` |
+| 异步工具支持 | 已实现 | `app/core/tool_registry.py`, `app/core/runner.py` |
+| 请求超时 + 重试 | 已实现 | `app/core/resilience.py`, `app/core/runner.py` |
+| OpenTelemetry Tracing | 已实现 | `app/core/tracing.py` |
+| Token 限流 | 已实现 | `app/core/rate_limiter.py` |
+| 熔断器 | 已实现 | `app/core/resilience.py` |
+| 输入过滤 Middleware | 已实现 | `app/security/input_guard.py` |
+| 记忆摘要与文档记忆 | 已实现 | `app/memory/` |
+| Checkpoint 恢复 | 已实现 | `app/core/checkpoint.py`, `app/core/runner.py` |
+| MCP 工具接入 | 已实现 | `app/mcp/` |
+| A2A 协议支持 | 已实现 | `app/a2a/` |
 
-| 功能 | 状态 | 关键文件 |
-|------|------|---------|
-| **工具沙箱** | ✅ 已实现 (`app/tools/sandbox.py`) | `app/tools/builtin_tools.py` |
-| **请求超时 + 重试** | ✅ 已实现 (`app/core/resilience.py`) | `app/core/runner.py` |
-| **OpenTelemetry Tracing** | ✅ 已实现 (`app/core/tracing.py`) | `app/core/hooks.py` |
+---
 
-### P1 —— 完善生产可用性
+## A2A 实现结果
 
-| 功能 | 状态 | 关键文件 |
-|------|------|---------|
-| **Pydantic 参数校验装饰器** | ✅ 已实现 (`app/tools/validator.py`) | 新建 `app/tools/validator.py` |
-| **异步工具支持** | 🔲 待实现 | `app/core/runner.py` |
-| **记忆摘要压缩** | ✅ 已实现 (`app/memory/summarizer.py`) | `app/memory/summarizer.py` |
-| **输入过滤 Middleware** | ✅ 已实现 (`app/security/input_guard.py`) | `app/security/input_guard.py` |
-| **Token 限流** | ✅ 已实现 (`app/core/rate_limiter.py`) | `app/core/rate_limiter.py` |
-| **熔断器模式** | ✅ 已实现 (`app/core/resilience.py`) | `app/core/circuit_breaker.py` |
-| **语义向量记忆 (RAG)** | 🔲 待实现 | `app/memory/vector_store.py` |
+| 阶段 | 结果 |
+|------|------|
+| P0 | A2A 协议边界独立于 `AgentRunner` |
+| P1 | A2A Server message/task MVP |
+| P2 | Task 生命周期、取消、终态保护 |
+| P3 | 统一事件 broker、`message:stream`、`tasks/{id}:subscribe` |
+| P4 | 公开 Agent Card、认证扩展 Agent Card |
+| P5 | A2A Client、远端 Agent 工具桥 |
 
-### P2 —— 高级特性
+详见：[A2A 协议支持说明](a2a.md)。
+
+---
+
+## 后续优先级
+
+### P0 - 持久化与多实例基础
 
 | 功能 | 价值 |
 |------|------|
-| 工具并行执行 | LLM 返回多个 function_call 时串行等待 |
-| 多 Agent 协作协议 | 单 Agent 无法处理复杂任务分解 |
-| 记忆分层 (Working/Episodic/Semantic) | 统一存储无法区分访问频率 |
-| Prompt Injection 检测 | 被动过滤无法主动防御 |
-| PII 脱敏 | 敏感信息泄露风险 |
-| 慢工具报警 | 无性能监控 |
+| Redis/SQLite SessionManager | 支持服务重启后恢复 session |
+| 持久化 A2A Task Store | 支持 A2A Task 查询与订阅跨进程 |
+| 持久化 Event Log | 支持 A2A 事件 replay |
+| 配置化远端 A2A Agent Registry | 启动时自动注册远端 Agent 工具 |
+
+### P1 - 执行效率与协作能力
+
+| 功能 | 价值 |
+|------|------|
+| 工具并行执行 | LLM 一次返回多个 function_call 时减少等待 |
+| Runner 协作式取消 | A2A cancel 可尝试中断运行中的 LLM/tool |
+| Async A2A Client | 支持高并发远端 Agent 调用 |
+| Agent Router/Supervisor | 在多个本地/远端 Agent 间路由任务 |
+
+### P2 - 安全与治理
+
+| 功能 | 价值 |
+|------|------|
+| Prompt Injection 检测 | 提升工具和记忆使用安全性 |
+| PII 脱敏 | 降低敏感信息泄露风险 |
+| A2A 细粒度鉴权 | 按 skill/tool/context 控制访问 |
+| Agent Card 签名 | 提升远端 Agent 发现可信度 |
+| 慢工具报警 | 发现高延迟工具和退化链路 |
+
+### P3 - 记忆和检索
+
+| 功能 | 价值 |
+|------|------|
+| 语义向量记忆 | 支持更强的长期知识检索 |
+| 分层记忆 | 区分 Working/Episodic/Semantic Memory |
+| 记忆写入审计 | 降低错误记忆污染 |
 
 ---
 
-## 重点功能实现思路
+## 当前面试亮点
 
-### 1. 工具沙箱（安全 P0）
-
-用 AST 静态分析替代 `eval()`：
-
-```python
-# app/tools/sandbox.py
-class SafeEvaluator(ast.NodeVisitor):
-    SAFE_FUNCTIONS = {"abs", "round", "min", "max", "pow", "floor", "ceil"}
-    ALLOWED_OPS = {ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod}
-
-    def visit_BinOp(self, node):
-        # 只允许数学运算
-        if type(node.op) not in self.ALLOWED_OPS:
-            raise ValueError(f"Unsupported: {type(node.op)}")
-        return super().visit_BinOp(node)
-```
-
-### 2. OpenTelemetry Tracing
-
-在 `AgentRunner.run()` 中埋入 Span：
-
-```python
-with tracer.start_as_current_span("agent_run") as span:
-    span.set_attribute("agent.name", agent.name)
-    for step in range(1, max_steps + 1):
-        with tracer.start_as_current_span(f"step_{step}"):
-            # llm span → tool spans 父子关系
-```
-
-### 3. 熔断器（Resilience P1）
-
-```python
-class CircuitBreaker:
-    states = {"closed", "open", "half_open"}
-    # 失败 N 次 → open → 超时后 half_open → 成功则 closed
-```
-
-### 4. 记忆摘要压缩
-
-```python
-# 当 history 超过阈值，用 LLM 生成摘要，替换旧消息块
-class MemorySummarizer:
-    async def summarize(self, messages) -> str:
-        # 调用 LLM 将 10 条消息压缩为 1 条摘要
-```
+| 维度 | 亮点 |
+|------|------|
+| Agent Runtime | 多步推理、工具回灌、checkpoint、非幂等工具恢复保护 |
+| 协议集成 | MCP 管工具/资源，A2A 管 Agent 间协作 |
+| 扩展机制 | Hooks + Middleware 低侵入扩展 |
+| 可观测性 | OpenTelemetry run/step/LLM/tool span |
+| 韧性治理 | timeout/retry/rate limit/circuit breaker |
+| 安全 | 输入过滤、工具沙箱、参数校验、A2A 扩展卡 bearer auth |
+| 流式能力 | `/chat/stream` + A2A task event broker |
+| 测试 | 覆盖 runner、tool、mcp、a2a、checkpoint、session |
 
 ---
 
-## 面试核心亮点
+## 验证建议
 
-| 维度 | 设计模式 | 可引申话题 |
-|------|---------|-----------|
-| 工具生态 | 装饰器、Strategy、ThreadPoolExecutor | GIL 规避、Python 并发模型 |
-| 记忆系统 | RAG、Embedding、分层架构 | Mem0、向量数据库选型 |
-| 多 Agent | Pub/Sub、拓扑排序、Supervisor | LangGraph、斯坦福 ChatDev |
-| 可观测性 | OpenTelemetry、Prometheus | SLO/SLA、CNCF 全家桶 |
-| 安全性 | AST 沙箱、Chain of Responsibility | OWASP、零信任 |
-| 生产特性 | Token Bucket、Circuit Breaker | 微服务韧性、Hystrix |
-
----
-
-## 验证方案
-
-1. **安全修复**：验证 `calculator("1+1")` 正常返回，`calculator("os.system('rm')")` 被拦截
-2. **Tracing**：用 Jaeger 验证一次请求的 Trace ID 贯穿 LLM 调用 → 工具执行 → 响应
-3. **熔断**：连续触发工具失败 N 次后，后续调用直接被熔断拦截
-4. **限流**：快速发送超过阈值的请求，验证返回 429 或优雅拒绝
-5. **记忆摘要**：发送 20 条消息后，验证历史被压缩为摘要 + 最近消息
+```bash
+pytest
+pytest tests/a2a -q
+pytest tests/core/test_runner.py -q
+pytest tests/mcp -q
+pytest tests/tools -q
+```
 
 ---
 
 ## 关键文件参考
 
-- [runner.py](app/core/runner.py) — 执行引擎核心，所有扩展的集成点
-- [tool_registry.py](app/core/tool_registry.py) — 工具注册与调用链路
-- [middleware.py](app/core/middleware.py) — Middleware 鉴权链插入点
-- [hooks.py](app/core/hooks.py) — 生命周期钩子，可观测性和记忆系统的旁路监听点
-- [builtin_tools.py](app/tools/builtin_tools.py) — 内置工具实现
-- [sandbox.py](app/tools/sandbox.py) — 工具参数沙箱校验（已替代 eval）
-- [resilience.py](app/core/resilience.py) — 超时、重试、熔断器
-- [tracing.py](app/core/tracing.py) — OpenTelemetry 链路追踪
-- [rate_limiter.py](app/core/rate_limiter.py) — TokenBucket 限流
-- [summarizer.py](app/memory/summarizer.py) — 记忆摘要压缩
-- [input_guard.py](app/security/input_guard.py) — 输入安全过滤
+- `app/core/runner.py` - 执行引擎核心
+- `app/core/tool_registry.py` - 本地工具注册
+- `app/mcp/` - MCP 工具接入
+- `app/a2a/` - A2A 协议支持
+- `app/core/checkpoint.py` - 断点恢复
+- `app/core/resilience.py` - 超时、重试、熔断
+- `app/core/tracing.py` - OpenTelemetry
+- `app/security/input_guard.py` - 输入安全过滤
+- `docs/a2a.md` - A2A 详细说明
 
-*最后更新：2026/04/26*
+---
+
+*最后更新：2026/05/03*

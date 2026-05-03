@@ -1,25 +1,20 @@
 # Minimal Agent API
 
-基于 FastAPI 的轻量级 Agent 对话框架，支持工具调用、会话管理、SSE 流式响应、Hooks 与 Middleware 扩展机制。
+基于 FastAPI 的轻量级 Agent 运行时框架，支持多轮对话、工具调用、SSE 流式响应、Hooks/Middleware、MCP 工具接入、A2A Agent 协作协议、记忆、限流、熔断、Tracing 和断点恢复。
 
 ---
 
 ## 项目做什么
 
-本项目实现了一个 **LLM Agent 运行时框架**，核心能力包括：
+MyAgent 实现了一套可扩展的 LLM Agent 后端运行时：
 
-- **对话管理**：支持多轮会话，基于 session_id 维护上下文历史
-- **工具调用**：内置工具注册中心，支持 Agent 动态调用外部工具（如计算器、时间查询）
-- **SSE 流式响应**：`/chat/stream` 接口支持 Server-Sent Events，实时推送执行事件
-- **可扩展架构**：提供 Hooks（钩子）和 Middleware（中间件）机制，支持在 Agent 运行生命周期中注入自定义逻辑
-
----
-
-## 面向谁
-
-- 希望快速搭建 LLM Agent 对话服务的开发者
-- 需要在 Agent 流程中嵌入自定义逻辑（鉴权、日志、裁剪等）的二次开发者
-- 学习 Agent 运行时设计模式（工具调用、Hooks、Middleware）的实践者
+- **对话接口**：`/chat` 和 `/chat/stream` 支持普通对话与 SSE 流式响应。
+- **工具调用**：`ToolRegistry` 支持 OpenAI tools schema、Pydantic 参数校验、同步/异步工具调用。
+- **A2A 协议**：作为 A2A Server 暴露 Agent Card、message/task API、任务订阅；作为 A2A Client 调用远端 Agent，并可把远端 Agent 注册为本地工具。
+- **MCP 接入**：支持 stdio/SSE MCP Server 注册、远程工具发现与调用。
+- **运行时扩展**：Hooks 和 Middleware 可插入日志、SSE、安全过滤、历史裁剪、权限控制等逻辑。
+- **工程治理**：支持超时、重试、Token Bucket 限流、Circuit Breaker 熔断、OpenTelemetry tracing。
+- **状态管理**：支持 session、多轮上下文、文件型记忆、checkpoint 断点恢复。
 
 ---
 
@@ -27,133 +22,113 @@
 
 | 能力 | 说明 |
 |------|------|
-| **Agent 运行时** | 基于 OpenAI Responses API 的 Agent 执行循环，支持多步推理和工具调用 |
-| **工具注册中心** | `ToolRegistry` 管理工具定义与执行，内置 `calculator`、`get_current_time`，支持沙箱参数校验 |
-| **会话管理** | `SessionManager` 抽象会话存储，默认提供 `InMemorySessionManager` |
-| **Hooks 机制** | 在 `run_start`、`llm_start`、`llm_end`、`tool_end` 等生命周期节点插入逻辑 |
-| **Middleware 机制** | 在 LLM 调用前/工具调用前拦截和修改上下文，支持 `before_llm`、`before_tool` |
-| **SSE 流式** | `/chat/stream` 通过 `EventChannel` 实现实时事件推送 |
-| **链路追踪** | OpenTelemetry 集成，支持 Trace ID 串联 LLM 调用 → 工具执行 → 响应全链路 |
-| **限流保护** | `TokenRateLimiter` 基于 Token Bucket 算法，防止 LLM API 过载 |
-| **韧性机制** | 超时控制、重试策略（指数退避）、熔断器模式 |
-| **记忆压缩** | `MemorySummarizer` 对过长历史消息进行 LLM 摘要压缩 |
-| **安全过滤** | `InputGuard` 中间件防护 Prompt Injection / XSS 等攻击 |
-| **断点恢复** | `CheckpointManager` 支持 Agent 执行中途断点续算 |
+| Agent Runner | 基于 OpenAI Responses API 的多步推理 + 工具调用循环 |
+| Tool Registry | 管理本地工具、远程 A2A Agent 工具、MCP 工具 |
+| A2A Server | `/.well-known/agent-card.json`、`/a2a/v1/message:*`、`/a2a/v1/tasks*` |
+| A2A Client | 发现远端 Agent Card、发送消息、消费 SSE、订阅/取消远端 Task |
+| SSE Streaming | `/chat/stream` 与 A2A streaming/subscription 都基于 SSE |
+| Hooks/Middleware | 生命周期观察和执行前拦截 |
+| Checkpoint | 工具调用阶段保存快照，支持恢复并避免非幂等工具重复执行 |
+| Memory | 文档型记忆和会话摘要注入 |
+| Observability | OpenTelemetry span 覆盖 run/step/LLM/tool |
+| Resilience | 超时、重试、限流、熔断 |
 
 ---
 
-## 本地启动方式
-
-### 1. 安装依赖
+## 快速启动
 
 ```bash
 pip install -r requirements.txt
-```
-
-### 2. 配置环境变量
-
-创建 `.env` 文件（参考 `.env`）：
-
-```env
-LLM_MODEL_ID=qwen3.5-flash
-LLM_API_KEY=your_api_key_here
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_TIMEOUT=60
-MAX_STEPS=5
-```
-
-### 3. 启动服务
-
-```bash
 uvicorn app.api:app --reload --host 0.0.0.0 --port 8000
 ```
 
-访问 http://localhost:8000/docs 查看 FastAPI 自动生成的交互文档。
+`.env` 示例：
+
+```env
+LLM_API_KEY=your_api_key_here
+LLM_MODEL_ID=qwen3.5-flash
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_TIMEOUT=30
+MAX_STEPS=5
+
+A2A_PUBLIC_URL=http://localhost:8000
+A2A_AGENT_VERSION=0.1.0
+A2A_DOCUMENTATION_URL=
+A2A_ICON_URL=
+A2A_EXTENDED_CARD_TOKEN=
+```
+
+访问：
+
+- API 文档：http://localhost:8000/docs
+- 健康检查：http://localhost:8000/
+- A2A Agent Card：http://localhost:8000/.well-known/agent-card.json
+
+---
+
+## 主要端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/` | 健康检查 |
+| `POST` | `/chat` | 普通对话 |
+| `POST` | `/chat/stream` | SSE 流式对话 |
+| `GET` | `/.well-known/agent-card.json` | A2A Agent Card |
+| `GET` | `/a2a/v1/extendedAgentCard` | 认证扩展 Agent Card |
+| `POST` | `/a2a/v1/message:send` | A2A 消息发送 |
+| `POST` | `/a2a/v1/message:stream` | A2A 消息流式执行 |
+| `GET` | `/a2a/v1/tasks/{task_id}` | 查询 A2A Task |
+| `GET` | `/a2a/v1/tasks` | 查询 A2A Task 列表 |
+| `POST` | `/a2a/v1/tasks/{task_id}:cancel` | 取消 A2A Task |
+| `POST` | `/a2a/v1/tasks/{task_id}:subscribe` | 订阅 A2A Task 事件 |
+| `POST` | `/checkpoint/{session_id}/resume` | 恢复 checkpoint |
+| `GET` | `/checkpoint/{session_id}` | 查询 checkpoint |
+| `DELETE` | `/checkpoint/{session_id}` | 删除 checkpoint |
 
 ---
 
 ## 目录结构
 
-```
-MyAgent/
-├── app/
-│   ├── api.py                 # FastAPI 入口，定义 /chat 和 /chat/stream 接口
-│   ├── agents/
-│   │   ├── agent_base.py      # BaseAgent 抽象类
-│   │   ├── chat_agent.py      # ChatAgent 实现
-│   │   └── tool_aware_agent.py# 工具感知 Agent，收集工具调用事件
-│   ├── configs/
-│   │   ├── config.py          # 环境变量配置（LLM_API_KEY, LLM_MODEL_ID 等）
-│   │   └── logger.py          # 日志配置
-│   ├── core/
-│   │   ├── runner.py          # AgentRunner，核心运行循环
-│   │   ├── tool_registry.py   # ToolRegistry，工具注册与调用
-│   │   ├── session_manager.py # BaseSessionManager / InMemorySessionManager
-│   │   ├── event_channel.py   # EventChannel，SSE 事件通道
-│   │   ├── hooks.py           # BaseRunnerHooks / CompositeRunnerHooks
-│   │   ├── middleware.py      # BaseRunnerMiddleware / CompositeRunnerMiddleware
-│   │   ├── resilience.py      # 超时、重试、熔断器
-│   │   ├── tracing.py         # OpenTelemetry 链路追踪
-│   │   ├── rate_limiter.py    # TokenBucket 限流器
-│   │   └── checkpoint.py      # Checkpoint 状态快照
-│   ├── hooks/
-│   │   ├── logging_hooks.py   # LoggingHooks，日志记录实现
-│   │   └── sse_hooks.py       # SSEHooks，SSE 事件发布
-│   ├── middleware/
-│   │   ├── history_trim_middleware.py    # 历史裁剪中间件
-│   │   └── tool_permission_middleware.py  # 工具权限控制中间件
-│   ├── tools/
-│   │   ├── builtin_tools.py   # 内置工具：calculator, get_current_time
-│   │   ├── sandbox.py         # 工具参数沙箱校验
-│   │   ├── register.py        # build_default_registry 工厂函数
-│   │   └── validator.py      # 工具参数 Pydantic 校验
-│   ├── memory/
-│   │   └── summarizer.py      # 记忆摘要压缩
-│   ├── security/
-│   │   └── input_guard.py     # 输入安全过滤
-│   ├── obj/
-│   │   ├── schemas.py         # Pydantic 请求/响应模型
-│   │   └── types.py           # 类型定义（Event、Message 等）
-│   ├── prompts/
-│   │   └── prompt.py          # SYSTEM_PROMPT 系统提示词
-│   ├── exceptions/
-│   │   └── agent.py           # Agent 相关异常定义
-│   └── listener/              # 预留目录（暂无内容）
-├── docs/                      # 项目文档
-├── tests/                     # 测试文件
-├── requirements.txt           # Python 依赖
-└── .env                       # 环境变量（本地）
+```text
+app/
+├── a2a/          # A2A schemas, server, client, task store, event broker, tool bridge
+├── agents/       # BaseAgent, ChatAgent, ToolAwareAgent
+├── configs/      # 环境变量与日志
+├── core/         # Runner, hooks, middleware, session, checkpoint, resilience, tracing
+├── hooks/        # LoggingHooks, SSEHooks
+├── mcp/          # MCP client, config, transport, tool registry
+├── memory/       # Document memory and summarizer
+├── middleware/   # History trim, tool permission
+├── obj/          # API schemas and runtime TypedDicts
+├── security/     # Input guard
+├── skills/       # Slash skills
+└── tools/        # Built-in tools, sandbox, validator, registry factory
 ```
 
 ---
 
-## 常见命令
-
-| 命令 | 说明 |
-|------|------|
-| `uvicorn app.api:app --reload` | 启动开发服务器（热重载） |
-| `uvicorn app.api:app --host 0.0.0.0 --port 8000` | 生产环境启动 |
-| `pytest` | 运行单元测试 |
-| `pytest -v` | 详细模式运行测试 |
-
----
-
-## 相关文档入口
+## 文档入口
 
 | 文档 | 说明 |
 |------|------|
-| [FastAPI 文档](https://fastapi.tiangolo.com/) | Web 框架 |
-| [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) | LLM 接口 |
-| [阿里云 DashScope](https://dashscope.console.aliyun.com/) | 通义千问 API 服务 |
+| [QuickStart](QuickStart.md) | 本地启动、调用示例、端点一览 |
+| [API 文档](api.md) | Chat、Checkpoint、A2A、SSE 和错误格式 |
+| [Structure](Structure.md) | 系统架构与核心链路 |
+| [A2A 协议支持](a2a.md) | A2A Server/Client/Task/Streaming/Agent Card 完整说明 |
+| [项目指标](project-metrics.md) | 代码规模、端点、工具、测试指标 |
+| [ADR](adr/README.md) | 架构决策记录 |
 
 ---
 
-## 负责人 / 维护人
+## 常用命令
 
-| 角色 | 职责 |
+| 命令 | 说明 |
 |------|------|
-| **Maintainer** | 项目整体架构设计与核心实现 |
+| `uvicorn app.api:app --reload --host 0.0.0.0 --port 8000` | 启动开发服务 |
+| `pytest` | 运行全部测试 |
+| `pytest tests/a2a -q` | 运行 A2A 测试 |
+| `pytest tests/core/test_runner.py -q` | 运行 Runner 核心测试 |
 
 ---
 
-> 如有使用问题或贡献想法，欢迎提交 Issue 或 Pull Request。
+*最后更新：2026/05/03*

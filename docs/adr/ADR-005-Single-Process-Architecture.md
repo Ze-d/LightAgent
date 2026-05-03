@@ -7,6 +7,7 @@ Accepted
 
 随着 Agent 对话场景扩展，系统面临扩展性选择：
 - **会话存储**：当前是 InMemory，未来是否需要 Redis 持久化？
+- **A2A Task/Event 存储**：当前是 InMemory，未来是否需要跨实例共享？
 - **服务拆分**：是否需要拆成 API 层、Agent 运行时层、LLM 网关层？
 - **多实例部署**：是否需要支持 uvicorn 多进程？
 
@@ -17,6 +18,7 @@ Accepted
 ### 方案 A：单体架构（当前选择）
 - 所有模块运行在单一 Python 进程中
 - InMemory 会话，InMemory 工具注册中心
+- InMemory A2A Task Store 与 Event Broker
 - 简单部署：`uvicorn app.api:app`
 
 ### 方案 B：引入 Redis + 多进程 uvicorn
@@ -56,8 +58,9 @@ Accepted
 
 | 场景 | 当前状态 | 未来升级路径 |
 |------|----------|--------------|
-| 多实例部署 | 不可行 | 实现 `RedisSessionManager` 替换 `InMemorySessionManager` |
+| 多实例部署 | 不可行 | 实现 `RedisSessionManager`、持久化 A2A Task Store 与 Event Log |
 | 会话持久化 | 进程重启丢失 | 会话写入 Redis，进程重启后可恢复 |
+| A2A Task 持久化 | 进程重启丢失 | Task/Event 写入 Redis、SQLite 或 Postgres |
 | 服务拆分 | 不可行 | 按模块边界拆分为独立服务，通过 HTTP/gRPC 通信 |
 | 高可用 | 无保障 | 引入多实例 + Redis + 负载均衡 |
 

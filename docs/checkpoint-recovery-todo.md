@@ -1,5 +1,7 @@
 # Checkpoint 恢复机制增强计划
 
+> 状态更新（2026/05/03）：核心 checkpoint 恢复能力已实现，包括阶段化 checkpoint、tool execution record、非幂等工具恢复保护和恢复端点。本文保留为历史设计记录，当前实现以 `app/core/checkpoint.py`、`app/core/runner.py` 和 `/checkpoint/{session_id}` API 为准。
+
 ## 背景
 
 当前 Checkpoint 机制已实现基础的保存和恢复功能（见 `app/core/checkpoint.py`），但在实现断点续算增强时存在恢复不完整的问题。

@@ -2,23 +2,29 @@
 
 ## 1. 系统上下游
 
-```
-上游：用户 / 客户端应用
+```text
+用户 / 客户端应用
         │
+        ├── /chat, /chat/stream
+        ├── A2A HTTP+JSON / SSE
+        └── Checkpoint API
         ▼
-┌─────────────────────────────────┐
-│        Minimal Agent API        │  ← 本系统
-│        (FastAPI + Python)        │
-└─────────────────────────────────┘
+┌──────────────────────────────────────┐
+│          Minimal Agent API            │
+│          FastAPI + Python             │
+└──────────────────────────────────────┘
         │
-        ▼
-下游：DashScope API（阿里云 LLM）
+        ├── OpenAI-compatible LLM API
+        ├── MCP Server（stdio/SSE，可选）
+        └── Remote A2A Agent（HTTP+JSON，可选）
 ```
 
 | 方向 | 组件 | 说明 |
 |------|------|------|
-| **上游** | 用户 / 客户端 | HTTP POST 请求，通过 `/chat` 或 `/chat/stream` 接入 |
-| **下游** | DashScope API | 阿里云 LLM 服务（OpenAI 兼容接口），实际模型为 qwen3.5-flash |
+| 上游 | 用户 / 客户端 | 通过 `/chat`、`/chat/stream` 或 A2A API 接入 |
+| 上游/下游 | Remote A2A Agent | 本系统既可作为 A2A Server，也可作为 A2A Client |
+| 下游 | DashScope/OpenAI-compatible API | LLM 推理服务 |
+| 下游 | MCP Server | 可选远程工具生态 |
 
 ---
 
@@ -26,173 +32,192 @@
 
 | 模块 | 路径 | 职责 |
 |------|------|------|
-| **api** | `app/api.py` | FastAPI 入口，定义 `/chat` 和 `/chat/stream` 端点 |
-| **agents** | `app/agents/` | Agent 核心抽象：BaseAgent, ChatAgent, ToolAwareAgent |
-| **core/runner** | `app/core/runner.py` | AgentRunner，核心运行循环，多步推理 + 工具调用 |
-| **core/tool_registry** | `app/core/tool_registry.py` | 工具注册与调用管理 |
-| **core/session_manager** | `app/core/session_manager.py` | 会话存储抽象（InMemory 实现） |
-| **core/event_channel** | `app/core/event_channel.py` | SSE 事件通道，异步队列 |
-| **core/hooks** | `app/core/hooks.py` | 生命周期钩子机制 |
-| **core/middleware** | `app/core/middleware.py` | 中间件机制，拦截 LLM/工具调用 |
-| **core/resilience** | `app/core/resilience.py` | 超时、重试、熔断器 |
-| **core/tracing** | `app/core/tracing.py` | OpenTelemetry 链路追踪 |
-| **core/rate_limiter** | `app/core/rate_limiter.py` | TokenBucket 限流器 |
-| **core/checkpoint** | `app/core/checkpoint.py` | 断点状态快照与恢复 |
-| **hooks** | `app/hooks/` | 钩子实现：LoggingHooks, SSEHooks |
-| **middleware** | `app/middleware/` | 中间件实现：HistoryTrimMiddleware, ToolPermissionMiddleware |
-| **memory** | `app/memory/` | 记忆摘要压缩 |
-| **security** | `app/security/` | 输入安全过滤 |
-| **tools** | `app/tools/` | 内置工具：calculator, get_current_time |
+| API | `app/api.py` | FastAPI 入口，注册 chat、checkpoint、A2A 路由 |
+| A2A | `app/a2a/` | A2A schema、server、client、task store、event broker、tool bridge |
+| Agents | `app/agents/` | BaseAgent、ChatAgent、ToolAwareAgent |
+| Runner | `app/core/runner.py` | 协议无关执行循环，多步推理 + 工具调用 |
+| Tool Registry | `app/core/tool_registry.py` | 本地工具注册与调用 |
+| MCP | `app/mcp/` | MCP 配置、Client、ToolRegistry、stdio/SSE transport |
+| Session | `app/core/session_manager.py` | 会话存储抽象，默认内存实现 |
+| Checkpoint | `app/core/checkpoint.py` | 执行快照与恢复 |
+| Event/SSE | `app/core/event_channel.py`, `app/core/sse.py` | SSE 事件通道与兼容响应 |
+| Hooks | `app/core/hooks.py`, `app/hooks/` | 生命周期观察者 |
+| Middleware | `app/core/middleware.py`, `app/middleware/` | LLM/tool 前置拦截 |
+| Resilience | `app/core/resilience.py`, `app/core/rate_limiter.py` | 超时、重试、熔断、限流 |
+| Tracing | `app/core/tracing.py` | OpenTelemetry tracing |
+| Memory | `app/memory/` | 文档型记忆与摘要 |
+| Security | `app/security/` | 输入安全过滤 |
+| Skills | `app/skills/` | slash-style skill |
+| Tools | `app/tools/` | 内置工具、沙箱、Pydantic 参数校验 |
 
 ---
 
-## 3. 数据流
+## 3. 普通 Chat 数据流
 
-### 对话请求处理流程
-
-```
-HTTP POST /chat 或 /chat/stream
+```text
+POST /chat 或 /chat/stream
     │
     ▼
 ChatRequest { message, session_id? }
     │
     ▼
-会话管理（创建/加载）→ InMemorySessionManager
+SessionManager 创建/加载 history
     │
     ▼
-追加用户消息到 history
+注入只读 memory context
     │
     ▼
 ToolAwareAgent + AgentRunner.run()
     │
-    ├── middleware.before_llm()      # 可拦截
-    ├── client.responses.create()    # 调用 LLM
+    ├── Middleware.before_llm()
+    ├── OpenAI-compatible Responses API
     ├── 解析 function_call
-    │
-    └── 如有工具调用:
-         ├── middleware.before_tool()  # 可拦截
-         └── tool_registry.call()      # 执行工具
+    └── ToolRegistry / MCPToolRegistry 执行工具
     │
     ▼
-返回 AgentRunResult { answer, success, steps, tool_events }
+AgentRunResult
     │
-    ▼
-保存会话 + 返回响应
+    ├── /chat 返回 ChatResponse
+    └── /chat/stream 通过 SSEHooks 推送事件
 ```
 
 ---
 
-## 4. 外部依赖
+## 4. A2A Server 数据流
+
+```text
+POST /a2a/v1/message:send 或 message:stream
+    │
+    ▼
+A2A Message
+    │
+    ▼
+A2AService
+    │
+    ├── InMemoryA2ATaskStore 创建 Task
+    ├── contextId 映射为内部 session_id
+    ├── A2AProtocolAdapter 转为 ChatMessage
+    ├── 调用现有 AgentRunner 链路
+    └── A2AEventBroker 记录/广播 StreamResponse
+    │
+    ▼
+A2A Task / SSE StreamResponse
+```
+
+状态映射：
+
+```text
+TASK_STATE_SUBMITTED
+  -> TASK_STATE_WORKING
+  -> TASK_STATE_COMPLETED | TASK_STATE_FAILED | TASK_STATE_CANCELED
+```
+
+---
+
+## 5. A2A Client 数据流
+
+```text
+AgentRunner 触发远端 Agent 工具（可选）
+    │
+    ▼
+register_remote_a2a_agent_tool 注册的 ToolSpec
+    │
+    ▼
+A2AClient
+    │
+    ├── GET /.well-known/agent-card.json
+    ├── POST /a2a/v1/message:send
+    └── 解析 Task/Artifact 文本
+    │
+    ▼
+远端 A2A Agent 响应回灌为本地工具结果
+```
+
+---
+
+## 6. 外部依赖
 
 | 依赖 | 类型 | 说明 |
 |------|------|------|
-| **DashScope API** | 外部服务 | 阿里云 LLM（OpenAI 兼容接口，实际 qwen3.5-flash） |
-| **openai** | Python 库 | OpenAI 兼容客户端 |
-| **python-dotenv** | Python 库 | .env 环境变量加载 |
-| **InMemorySessionManager** | 内存存储 | 会话存储（无持久化） |
-| **OpenTelemetry** | Python 库 | 链路追踪（可选，OTLP 导出） |
-| **tenacity** | Python 库 | 重试策略（指数退避） |
-| **TokenRateLimiter** | 内存存储 | LLM API 限流（Token Bucket） |
+| DashScope/OpenAI-compatible API | 外部服务 | LLM 推理服务 |
+| MCP Server | 外部服务/进程 | 可选工具服务 |
+| Remote A2A Agent | 外部服务 | 可选 Agent 协作对象 |
+| `openai` | Python 库 | LLM Client |
+| `httpx` | Python 库 | A2A/MCP HTTP Client |
+| `fastapi`, `uvicorn` | Python 库 | Web API |
+| `pydantic` | Python 库 | Schema 与参数校验 |
+| `tenacity` | Python 库 | 重试 |
+| `opentelemetry-*` | Python 库 | Tracing |
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `LLM_API_KEY` | 必填 | DashScope API 密钥 |
-| `LLM_MODEL_ID` | `qwen3.5-flash` | 模型名称 |
-| `LLM_BASE_URL` | 阿里云地址 | API 服务地址 |
+|------|------|------|
+| `LLM_API_KEY` | 必填 | LLM API Key |
+| `LLM_MODEL_ID` | `gpt-5.4-mini` | 模型名称，`.env.example` 中示例为 `qwen3.5-flash` |
+| `LLM_BASE_URL` | DashScope compatible URL | OpenAI-compatible API 地址 |
+| `LLM_TIMEOUT` | `30` | LLM 调用超时秒数 |
 | `MAX_STEPS` | `5` | Agent 最大执行步数 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | 可选 | OpenTelemetry OTLP 收集器地址 |
+| `A2A_PUBLIC_URL` | 空 | Agent Card 对外 URL；为空时用请求 base URL |
+| `A2A_AGENT_VERSION` | `0.1.0` | Agent Card 版本 |
+| `A2A_EXTENDED_CARD_TOKEN` | 空 | 扩展 Agent Card bearer token |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 可选 | OpenTelemetry OTLP endpoint |
 
 ---
 
-## 5. 部署拓扑
+## 7. API 端点
 
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/` | 健康检查 |
+| `POST` | `/chat` | 普通对话 |
+| `POST` | `/chat/stream` | SSE 流式对话 |
+| `GET` | `/.well-known/agent-card.json` | A2A Agent Card |
+| `GET` | `/a2a/v1/extendedAgentCard` | A2A 扩展 Agent Card |
+| `POST` | `/a2a/v1/message:send` | A2A 消息发送 |
+| `POST` | `/a2a/v1/message:stream` | A2A 消息流 |
+| `GET` | `/a2a/v1/tasks/{task_id}` | 查询 A2A Task |
+| `GET` | `/a2a/v1/tasks` | 查询 A2A Task 列表 |
+| `POST` | `/a2a/v1/tasks/{task_id}:cancel` | 取消 A2A Task |
+| `POST` | `/a2a/v1/tasks/{task_id}:subscribe` | 订阅 A2A Task |
+| `POST` | `/checkpoint/{session_id}/resume` | 恢复 checkpoint |
+| `GET` | `/checkpoint/{session_id}` | 查询 checkpoint |
+| `DELETE` | `/checkpoint/{session_id}` | 删除 checkpoint |
+
+---
+
+## 8. 部署拓扑
+
+```text
 ┌─────────────────────────────┐
-│      客户端 / 用户           │
+│ 客户端 / A2A Client          │
 └──────────┬──────────────────┘
-           │ HTTP
+           │ HTTP/SSE
            ▼
 ┌─────────────────────────────┐
-│   FastAPI (uvicorn)        │
-│   Host: 0.0.0.0:8000        │
-│                             │
-│  ┌───────────────────────┐  │
-│  │  Minimal Agent API    │  │
-│  │  - /chat              │  │
-│  │  - /chat/stream (SSE) │  │
-│  └───────────────────────┘  │
+│ FastAPI / uvicorn           │
+│ - Chat API                  │
+│ - A2A Server                │
+│ - Checkpoint API            │
 └──────────┬──────────────────┘
-           │ HTTPS
-           ▼
-┌─────────────────────────────┐
-│    DashScope API            │
-│    (阿里云 LLM)              │
-└─────────────────────────────┘
+           │
+           ├── LLM API
+           ├── MCP Server
+           └── Remote A2A Agent
 ```
 
-**部署形态**：传统 Python 进程（无容器化）
-
-**启动命令**：
-```bash
-uvicorn app.api:app --reload --host 0.0.0.0 --port 8000
-```
+当前部署形态仍是单 Python 进程。Session、A2A Task Store 和 Event Broker 默认都是内存实现。
 
 ---
 
-## 6. 核心链路
+## 9. 相关文档
 
-### 请求 → 响应完整链路
-
-```
-1. 客户端 POST /chat { message, session_id? }
-         │
-         ▼
-2. 会话管理
-   - session_id 为空 → 创建新会话
-   - session_id 有值 → 加载历史消息
-         │
-         ▼
-3. AgentRunner.run() 执行循环（最多 MAX_STEPS=5 步）
-   - 每步：LLM 推理 → 工具调用（如有）→ 结果收集
-         │
-         ▼
-4. SSEHooks 发布事件（流式模式）
-   - tool_start / tool_success / tool_error
-   - final_answer / error
-         │
-         ▼
-5. 保存会话到内存，返回 ChatResponse
-```
-
-### 工具调用链路
-
-```
-AgentRunner 发现 function_call
-         │
-         ▼
-middleware.before_tool() 拦截检查
-         │
-         ▼
-ToolRegistry.call(tool_name, arguments)
-         │
-         ▼
-内置工具执行 (calculator / get_current_time)
-         │
-         ▼
-ToolCallEvent 收集 → 返回给 LLM 继续推理
-```
+- [A2A 协议支持说明](a2a.md)
+- [QuickStart](QuickStart.md)
+- [API 文档](api.md)
+- [项目指标](project-metrics.md)
+- [ADR](adr/README.md)
 
 ---
 
-## 7. 内置工具清单
-
-| 工具名 | 参数 | 说明 |
-|--------|------|------|
-| `calculator` | `expression: str` | 数学表达式计算 |
-| `get_current_time` | `city: str` | 获取城市当前时间 |
-
----
-
-*最后更新：2026/04/26*
+*最后更新：2026/05/03*
