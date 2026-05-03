@@ -41,6 +41,7 @@ from app.core.context_state import (
     ContextChannel,
     InMemoryContextStore,
 )
+from app.core.context_builder import ContextBuilder, ContextEnvelope
 from app.core.event_channel import EventChannel
 from app.core.checkpoint import Checkpoint, CheckpointManager
 from app.tools.register import build_default_registry
@@ -49,9 +50,6 @@ from app.core.skill_dispatcher import SkillDispatcher
 from app.memory.document_store import DocumentMemoryStore
 from app.mcp.config import load_mcp_config
 from app.mcp.tool_registry import MCPToolRegistry
-
-
-MEMORY_CONTEXT_PREFIX = "[Memory]\n"
 
 
 @asynccontextmanager
@@ -112,6 +110,7 @@ session_manager: BaseSessionManager = InMemorySessionManager()
 context_store: BaseContextStore = InMemoryContextStore()
 checkpoint_manager = CheckpointManager()
 memory_store = DocumentMemoryStore()
+context_builder = ContextBuilder(memory_store=memory_store)
 tool_registry = build_default_registry()
 skill_registry = build_default_skills()
 skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)
@@ -163,29 +162,19 @@ def _default_provider() -> str:
 
 def _strip_memory_messages(history: list[ChatMessage]) -> list[ChatMessage]:
     """Remove transient memory context before persisting or rebuilding history."""
-    return [
-        message for message in history
-        if not (
-            message.get("role") == "system"
-            and message.get("content", "").startswith(MEMORY_CONTEXT_PREFIX)
-        )
-    ]
+    return context_builder.strip_transient_context(history)
 
 
-def _build_runner_history(history: list[ChatMessage], session_id: str) -> list[ChatMessage]:
-    """Inject read-only memory context into the prompt sent to AgentRunner."""
-    clean_history = _strip_memory_messages(history)
-    memory_context = memory_store.build_context(session_id=session_id)
-    if not memory_context:
-        return list(clean_history)
-
-    memory_message: ChatMessage = {
-        "role": "system",
-        "content": f"{MEMORY_CONTEXT_PREFIX}{memory_context}",
-    }
-    if clean_history and clean_history[0].get("role") == "system":
-        return [clean_history[0], memory_message, *clean_history[1:]]
-    return [memory_message, *clean_history]
+def _build_context_envelope(
+    history: list[ChatMessage],
+    session_id: str,
+) -> ContextEnvelope:
+    """Build the normalized LLM context envelope for one runner turn."""
+    context_state = context_store.require(session_id)
+    return context_builder.build(
+        context_state=context_state,
+        history=history,
+    )
 
 
 def _record_session_memory(session_id: str, user_message: str, assistant_message: str) -> None:
@@ -313,19 +302,19 @@ def _append_user_turn(
 
 def _prepare_agent_turn(
     req: ChatRequest,
-) -> tuple[str, list[ChatMessage], list[ChatMessage], ToolAwareAgent, bool]:
+) -> tuple[str, list[ChatMessage], ContextEnvelope, ToolAwareAgent, bool]:
     """Build the shared state needed by both sync and streaming chat endpoints."""
     session_id, history, created = _resolve_session(req)
     agent = _build_chat_agent()
     _discard_stale_checkpoint(session_id)
     _append_user_turn(session_id, history, req.message)
-    runner_history = _build_runner_history(history, session_id)
-    return session_id, history, runner_history, agent, created
+    context_envelope = _build_context_envelope(history, session_id)
+    return session_id, history, context_envelope, agent, created
 
 
 def _run_agent(
     agent: ToolAwareAgent,
-    runner_history: list[ChatMessage],
+    context_envelope: ContextEnvelope,
     session_id: str,
     hooks: CompositeRunnerHooks | None = None,
     resume_checkpoint: Checkpoint | None = None,
@@ -333,7 +322,7 @@ def _run_agent(
     """Call AgentRunner with the app-level registry and checkpoint manager."""
     return runner.run(
         agent=agent,
-        history=runner_history,
+        history=context_envelope.messages,
         tool_registry=tool_registry,
         hooks=hooks,
         session_id=session_id,
@@ -392,10 +381,10 @@ def _run_a2a_turn(message: A2AMessage, context_id: str) -> AgentRunResult:
     agent = _build_chat_agent()
     _discard_stale_checkpoint(session_id)
     _append_user_turn(session_id, history, user_message)
-    runner_history = _build_runner_history(history, session_id)
+    context_envelope = _build_context_envelope(history, session_id)
     run_result = _run_agent(
         agent=agent,
-        runner_history=runner_history,
+        context_envelope=context_envelope,
         session_id=session_id,
     )
     _persist_assistant_turn(
@@ -430,12 +419,12 @@ def chat(req: ChatRequest) -> ChatResponse:
         req.session_id is not None,
         len(req.message),
     )
-    session_id, history, runner_history, agent, _ = _prepare_agent_turn(req)
+    session_id, history, context_envelope, agent, _ = _prepare_agent_turn(req)
 
     try:
         run_result = _run_agent(
             agent=agent,
-            runner_history=runner_history,
+            context_envelope=context_envelope,
             session_id=session_id,
         )
         answer = run_result["answer"]
@@ -480,7 +469,7 @@ async def chat_stream(req: ChatRequest):
     run_hooks = CompositeRunnerHooks([LoggingHooks(), sse_hooks])
 
     try:
-        session_id, history, runner_history, agent, created = _prepare_agent_turn(req)
+        session_id, history, context_envelope, agent, created = _prepare_agent_turn(req)
     except HTTPException as e:
         await channel.publish({
             "event": "error",
@@ -503,7 +492,7 @@ async def chat_stream(req: ChatRequest):
                 None,  # use default thread pool
                 lambda: _run_agent(
                     agent=agent,
-                    runner_history=runner_history,
+                    context_envelope=context_envelope,
                     hooks=run_hooks,
                     session_id=session_id,
                 )
@@ -556,13 +545,13 @@ def resume_checkpoint(session_id: str) -> ChatResponse:
         )
 
     history = _load_session(internal_session_id)
-    runner_history = _build_runner_history(history, internal_session_id)
+    context_envelope = _build_context_envelope(history, internal_session_id)
     agent = _build_chat_agent()
 
     try:
         run_result = _run_agent(
             agent=agent,
-            runner_history=runner_history,
+            context_envelope=context_envelope,
             session_id=internal_session_id,
             resume_checkpoint=checkpoint,
         )
