@@ -1,4 +1,4 @@
-from app.a2a.agent_card import build_agent_card
+from app.a2a.agent_card import build_agent_card, build_extended_agent_card
 from app.a2a.schemas import A2A_PROTOCOL_VERSION
 from app.core.skill_registry import SkillRegistry
 from app.core.tool_registry import ToolRegistry
@@ -25,6 +25,9 @@ def test_build_agent_card_uses_aliases_and_public_url():
         }
     ]
     assert payload["capabilities"]["streaming"] is True
+    assert payload["capabilities"]["extendedAgentCard"] is False
+    assert payload["securitySchemes"] == {}
+    assert payload["securityRequirements"] == []
     assert payload["defaultInputModes"] == ["text/plain"]
     assert payload["defaultOutputModes"] == ["text/plain"]
 
@@ -60,3 +63,44 @@ def test_build_agent_card_exposes_local_skill_and_tool_capabilities():
     assert "slash-summarize" in skill_ids
     assert "registered-tools" in skill_ids
     assert "lookup" in skill_descriptions["registered-tools"]
+
+
+def test_build_agent_card_marks_extended_card_capability():
+    card = build_agent_card(
+        public_base_url="http://localhost:8000",
+        agent_name="chat-agent",
+        version="0.1.0",
+        documentation_url="http://localhost:8000/docs/a2a",
+        icon_url="http://localhost:8000/static/icon.png",
+        extended_card_enabled=True,
+    )
+    payload = card.model_dump(by_alias=True, exclude_none=True)
+
+    assert payload["capabilities"]["extendedAgentCard"] is True
+    assert payload["capabilities"]["extensions"][0]["uri"]
+    assert payload["documentationUrl"] == "http://localhost:8000/docs/a2a"
+    assert payload["iconUrl"] == "http://localhost:8000/static/icon.png"
+
+
+def test_build_extended_agent_card_exposes_tool_level_skills_and_bearer_auth():
+    tool_registry = ToolRegistry()
+    tool_registry.register({
+        "name": "lookup",
+        "description": "Lookup data",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": lambda: "ok",
+    })
+
+    card = build_extended_agent_card(
+        public_base_url="http://localhost:8000",
+        agent_name="chat-agent",
+        version="0.1.0",
+        tool_registry=tool_registry,
+    )
+    payload = card.model_dump(by_alias=True, exclude_none=True)
+    skill_ids = {skill["id"] for skill in payload["skills"]}
+
+    assert payload["capabilities"]["extendedAgentCard"] is True
+    assert payload["securitySchemes"]["bearerAuth"]["scheme"] == "bearer"
+    assert payload["securityRequirements"] == [{"bearerAuth": []}]
+    assert "tool-lookup" in skill_ids

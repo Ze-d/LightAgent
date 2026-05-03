@@ -12,7 +12,7 @@ TEXT_PLAIN = "text/plain"
 class A2ABaseModel(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
-        extra="forbid",
+        extra="ignore",
         use_enum_values=True,
     )
 
@@ -21,12 +21,21 @@ class AgentInterface(A2ABaseModel):
     url: str
     protocol_binding: Literal["HTTP+JSON"] = Field(alias="protocolBinding")
     protocol_version: str = Field(alias="protocolVersion")
+    tenant: str | None = None
+
+
+class AgentExtension(A2ABaseModel):
+    uri: str | None = None
+    description: str | None = None
+    required: bool = False
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentCapabilities(A2ABaseModel):
     streaming: bool = False
     push_notifications: bool = Field(default=False, alias="pushNotifications")
     extended_agent_card: bool = Field(default=False, alias="extendedAgentCard")
+    extensions: list[AgentExtension] = Field(default_factory=list)
 
 
 class AgentProvider(A2ABaseModel):
@@ -42,6 +51,16 @@ class AgentSkill(A2ABaseModel):
     examples: list[str] = Field(default_factory=list)
     input_modes: list[str] = Field(default_factory=list, alias="inputModes")
     output_modes: list[str] = Field(default_factory=list, alias="outputModes")
+    security_requirements: list[dict[str, list[str]]] = Field(
+        default_factory=list,
+        alias="securityRequirements",
+    )
+
+
+class AgentCardSignature(A2ABaseModel):
+    protected: str
+    signature: str
+    header: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentCard(A2ABaseModel):
@@ -51,12 +70,31 @@ class AgentCard(A2ABaseModel):
     url: str
     provider: AgentProvider | None = None
     protocol_version: str = Field(alias="protocolVersion")
-    supported_interfaces: list[AgentInterface] = Field(alias="supportedInterfaces")
+    preferred_transport: str | None = Field(default=None, alias="preferredTransport")
+    supported_interfaces: list[AgentInterface] = Field(
+        default_factory=list,
+        alias="supportedInterfaces",
+    )
+    additional_interfaces: list[AgentInterface] = Field(
+        default_factory=list,
+        alias="additionalInterfaces",
+    )
     capabilities: AgentCapabilities = Field(default_factory=AgentCapabilities)
+    security_schemes: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        alias="securitySchemes",
+    )
+    security_requirements: list[dict[str, list[str]]] = Field(
+        default_factory=list,
+        alias="securityRequirements",
+    )
+    security: list[dict[str, list[str]]] = Field(default_factory=list)
     default_input_modes: list[str] = Field(alias="defaultInputModes")
     default_output_modes: list[str] = Field(alias="defaultOutputModes")
     skills: list[AgentSkill] = Field(default_factory=list)
     documentation_url: str | None = Field(default=None, alias="documentationUrl")
+    signatures: list[AgentCardSignature] = Field(default_factory=list)
+    icon_url: str | None = Field(default=None, alias="iconUrl")
 
 
 class A2ARole(str, Enum):

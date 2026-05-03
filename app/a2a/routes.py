@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 
 from app.core.sse import EventSourceResponse
 from app.a2a.schemas import (
@@ -17,14 +17,40 @@ from app.a2a.service import A2AService, A2AServiceError
 
 
 def build_a2a_router(
-    agent_card_provider: Callable[[], AgentCard],
+    agent_card_provider: Callable[[str], AgentCard],
     service: A2AService | None = None,
+    extended_agent_card_provider: Callable[[str], AgentCard] | None = None,
+    extended_agent_card_token: str | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["A2A"])
 
     @router.get("/.well-known/agent-card.json", response_model=AgentCard)
-    def get_agent_card() -> AgentCard:
-        return agent_card_provider()
+    def get_agent_card(request: Request) -> AgentCard:
+        return agent_card_provider(str(request.base_url).rstrip("/"))
+
+    @router.get("/a2a/v1/extendedAgentCard", response_model=AgentCard)
+    def get_extended_agent_card(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> AgentCard:
+        if extended_agent_card_provider is None or not extended_agent_card_token:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "extended_agent_card_not_available",
+                    "message": "Extended Agent Card is not enabled.",
+                },
+            )
+        expected_header = f"Bearer {extended_agent_card_token}"
+        if authorization != expected_header:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "unauthorized",
+                    "message": "Valid bearer token is required.",
+                },
+            )
+        return extended_agent_card_provider(str(request.base_url).rstrip("/"))
 
     @router.get("/a2a/v1", include_in_schema=False)
     def get_a2a_interface_root() -> dict[str, str]:
@@ -63,7 +89,10 @@ def build_a2a_router(
 
     @router.post("/a2a/v1/message:stream", response_class=EventSourceResponse)
     async def stream_message(request: SendMessageRequest):
-        return EventSourceResponse(service.stream_message(request))
+        try:
+            return EventSourceResponse(service.stream_message(request))
+        except A2AServiceError as e:
+            raise_service_error(e)
 
     @router.get("/a2a/v1/tasks/{task_id}", response_model=Task)
     def get_task(
@@ -85,6 +114,13 @@ def build_a2a_router(
     ) -> Task:
         try:
             return service.cancel_task(task_id, request=request)
+        except A2AServiceError as e:
+            raise_service_error(e)
+
+    @router.post("/a2a/v1/tasks/{task_id}:subscribe", response_class=EventSourceResponse)
+    async def subscribe_task(task_id: str):
+        try:
+            return EventSourceResponse(service.subscribe_task(task_id))
         except A2AServiceError as e:
             raise_service_error(e)
 

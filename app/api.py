@@ -7,6 +7,9 @@ from openai import OpenAI
 from app.agents.tool_aware_agent import ToolAwareAgent
 from app.configs.config import (
     A2A_AGENT_VERSION,
+    A2A_DOCUMENTATION_URL,
+    A2A_EXTENDED_CARD_TOKEN,
+    A2A_ICON_URL,
     A2A_PUBLIC_URL,
     LLM_API_KEY,
     LLM_BASE_URL,
@@ -14,7 +17,7 @@ from app.configs.config import (
     LLM_TIMEOUT,
     MAX_STEPS,
 )
-from app.a2a import build_a2a_router, build_agent_card
+from app.a2a import build_a2a_router, build_agent_card, build_extended_agent_card
 from app.a2a.adapter import A2AProtocolAdapter
 from app.a2a.schemas import Message as A2AMessage
 from app.a2a.service import A2AService
@@ -112,11 +115,30 @@ a2a_adapter = A2AProtocolAdapter()
 a2a_task_store = InMemoryA2ATaskStore()
 
 
-def _build_a2a_agent_card():
+def _resolve_a2a_public_url(request_base_url: str) -> str:
+    return A2A_PUBLIC_URL or request_base_url
+
+
+def _build_a2a_agent_card(request_base_url: str):
     return build_agent_card(
-        public_base_url=A2A_PUBLIC_URL,
+        public_base_url=_resolve_a2a_public_url(request_base_url),
         agent_name="chat-agent",
         version=A2A_AGENT_VERSION,
+        documentation_url=A2A_DOCUMENTATION_URL,
+        icon_url=A2A_ICON_URL,
+        extended_card_enabled=bool(A2A_EXTENDED_CARD_TOKEN),
+        skill_registry=skill_registry,
+        tool_registry=tool_registry,
+    )
+
+
+def _build_a2a_extended_agent_card(request_base_url: str):
+    return build_extended_agent_card(
+        public_base_url=_resolve_a2a_public_url(request_base_url),
+        agent_name="chat-agent",
+        version=A2A_AGENT_VERSION,
+        documentation_url=A2A_DOCUMENTATION_URL,
+        icon_url=A2A_ICON_URL,
         skill_registry=skill_registry,
         tool_registry=tool_registry,
     )
@@ -333,6 +355,8 @@ app.include_router(
     build_a2a_router(
         agent_card_provider=_build_a2a_agent_card,
         service=a2a_service,
+        extended_agent_card_provider=_build_a2a_extended_agent_card,
+        extended_agent_card_token=A2A_EXTENDED_CARD_TOKEN,
     )
 )
 

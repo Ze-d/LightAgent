@@ -32,7 +32,9 @@ any late runner result is ignored by the task store.
 
 ## Still Out Of Scope
 
-- `tasks/{id}:subscribe`
 - push notification callbacks
 - cooperative cancellation inside `AgentRunner`
 - persistent task storage
+
+Task subscription and shared streaming events were added in P3. See
+`docs/a2a-p3-streaming-events.md`.
