@@ -1,4 +1,6 @@
 """Checkpoint mechanism for agent run recovery."""
+import hashlib
+import json
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -285,4 +287,190 @@ class SQLiteCheckpointManager:
             function_outputs=payload.get("function_outputs", []),
             completed_call_ids=payload.get("completed_call_ids", []),
             error=payload.get("error"),
+        )
+
+
+@dataclass
+class ResumeContext:
+    """Execution context prepared from a checkpoint for the runner to resume."""
+    run_id: str
+    start_step: int
+    current_input: list[dict[str, Any]] | str
+    resume_tool_records: list[ToolExecutionRecord] | None
+    collected_events: list[dict[str, Any]]
+
+
+class CheckpointOrchestrator:
+    """Encapsulates checkpoint save, load, clear, and resume logic.
+
+    This is a collaborator for AgentRunner — not middleware. The runner
+    maintains control of the execution loop and calls the orchestrator at
+    the appropriate phases. The orchestrator is responsible for *what* to
+    persist and *how* to interpret a stored checkpoint for resumption.
+    """
+
+    def __init__(self, manager: CheckpointManager | SQLiteCheckpointManager) -> None:
+        self._manager = manager
+
+    # ── static helpers (moved from AgentRunner) ──────────────────────────
+
+    @staticmethod
+    def history_from_input(current_input: list[dict[str, Any]] | str) -> list[dict[str, Any]]:
+        if isinstance(current_input, list):
+            return deepcopy(current_input)
+        return [{"role": "user", "content": current_input}]
+
+    @staticmethod
+    def hash_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> str:
+        payload = json.dumps(
+            {"tool_name": tool_name, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def is_record_complete(record: ToolExecutionRecord) -> bool:
+        return record.status in {"succeeded", "failed"} and record.output is not None
+
+    @staticmethod
+    def record_to_function_output(record: ToolExecutionRecord) -> FunctionCallOutput:
+        output = record.output
+        if output is None:
+            output = record.error or "工具执行状态未知，未获得可恢复结果。"
+        return {
+            "type": "function_call_output",
+            "call_id": record.call_id,
+            "output": output,
+        }
+
+    # ── tool record construction ─────────────────────────────────────────
+
+    @staticmethod
+    def build_tool_records(
+        function_calls: list[Any],
+        tool_registry: Any,
+        run_id: str,
+    ) -> list[ToolExecutionRecord]:
+        """Build ToolExecutionRecord list from LLM function_call items."""
+        records: list[ToolExecutionRecord] = []
+        for fc in function_calls:
+            try:
+                arguments = json.loads(fc.arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+            if hasattr(tool_registry, "get_side_effect_policy"):
+                side_effect_policy = tool_registry.get_side_effect_policy(fc.name)
+            else:
+                side_effect_policy = "read_only"
+            records.append(
+                ToolExecutionRecord(
+                    call_id=fc.call_id,
+                    tool_name=fc.name,
+                    arguments=arguments,
+                    arguments_hash=CheckpointOrchestrator.hash_tool_arguments(
+                        fc.name, arguments
+                    ),
+                    side_effect_policy=side_effect_policy,
+                    idempotency_key=f"{run_id}:{fc.call_id}",
+                )
+            )
+        return records
+
+    # ── save / load / clear ──────────────────────────────────────────────
+
+    def save(
+        self,
+        session_id: str | None,
+        step: int,
+        phase: CheckpointPhase,
+        current_input: list[dict[str, Any]] | str,
+        agent: Any,  # BaseAgent (avoid circular import)
+        run_id: str,
+        tool_calls: list[ToolExecutionRecord] | None = None,
+        function_outputs: list[FunctionCallOutput] | None = None,
+        error: str | None = None,
+    ) -> None:
+        if not session_id:
+            return
+        history_source: list[dict[str, Any]] | str = (
+            function_outputs if function_outputs is not None else current_input
+        )
+        self._manager.save(
+            session_id=session_id,
+            step=step,
+            history=self.history_from_input(history_source),
+            agent_state=agent.get_state(),
+            phase=phase,
+            llm_input=deepcopy(current_input),
+            tool_calls=deepcopy(tool_calls or []),
+            function_outputs=deepcopy(function_outputs or []),
+            run_id=run_id,
+            error=error,
+        )
+
+    def load(self, session_id: str) -> Checkpoint | None:
+        return self._manager.load(session_id)
+
+    def clear(self, session_id: str | None) -> None:
+        if session_id:
+            self._manager.clear(session_id)
+
+    def has_checkpoint(self, session_id: str) -> bool:
+        return self._manager.has_checkpoint(session_id)
+
+    def get_latest_step(self, session_id: str) -> int:
+        return self._manager.get_latest_step(session_id)
+
+    @property
+    def manager(self) -> CheckpointManager | SQLiteCheckpointManager:
+        return self._manager
+
+    # ── resume ───────────────────────────────────────────────────────────
+
+    def prepare_resume(
+        self,
+        checkpoint: Checkpoint,
+        agent: Any,  # BaseAgent
+        max_steps: int,
+    ) -> ResumeContext:
+        """Parse a checkpoint into the execution context needed to resume.
+
+        The caller (AgentRunner) receives a ResumeContext and uses it to
+        configure its main loop: where to start, what input to feed, and
+        which tool records still need executing.
+        """
+        agent.restore_state(checkpoint.agent_state)
+        restored_tool_events = agent.get_state().get("tool_event_history", [])
+        collected_events: list[dict[str, Any]] = (
+            list(restored_tool_events) if isinstance(restored_tool_events, list) else []
+        )
+
+        current_input = (
+            checkpoint.llm_input
+            if checkpoint.llm_input is not None
+            else checkpoint.history
+        )
+        start_step = max(checkpoint.step, 1)
+        resume_tool_records: list[ToolExecutionRecord] | None = None
+
+        if checkpoint.phase in {"tool_requested", "tool_partial_done"}:
+            resume_tool_records = deepcopy(checkpoint.tool_calls)
+        elif checkpoint.phase == "tool_output_ready":
+            current_input = (
+                list(checkpoint.function_outputs)
+                if checkpoint.function_outputs
+                else list(checkpoint.history)
+            )
+            start_step = min(checkpoint.step + 1, max_steps + 1)
+        elif checkpoint.phase in {"completed", "failed"}:
+            start_step = max_steps + 1
+
+        return ResumeContext(
+            run_id=checkpoint.run_id or "",
+            start_step=start_step,
+            current_input=current_input,
+            resume_tool_records=resume_tool_records,
+            collected_events=collected_events,
         )

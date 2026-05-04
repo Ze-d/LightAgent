@@ -43,7 +43,7 @@ from app.core.context_state import (
 )
 from app.core.context_builder import ContextBuilder, ContextEnvelope
 from app.core.event_channel import EventChannel
-from app.core.checkpoint import Checkpoint, CheckpointManager
+from app.core.checkpoint import Checkpoint, CheckpointManager, CheckpointOrchestrator
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
@@ -100,15 +100,17 @@ composite_middleware = CompositeRunnerMiddleware([
 
 app = FastAPI(title="Minimal Agent API", lifespan=lifespan)
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT)
+session_manager: BaseSessionManager = InMemorySessionManager()
+context_store: BaseContextStore = InMemoryContextStore()
+checkpoint_manager = CheckpointManager()
+checkpoint_orchestrator = CheckpointOrchestrator(checkpoint_manager)
 runner = AgentRunner(
     client=client,
     max_steps=MAX_STEPS,
     hooks=composite_hooks,
     middleware=composite_middleware,
+    checkpoint=checkpoint_orchestrator,
 )
-session_manager: BaseSessionManager = InMemorySessionManager()
-context_store: BaseContextStore = InMemoryContextStore()
-checkpoint_manager = CheckpointManager()
 memory_store = DocumentMemoryStore()
 context_builder = ContextBuilder(memory_store=memory_store)
 tool_registry = build_default_registry()
@@ -274,7 +276,7 @@ def _discard_stale_checkpoint(session_id: str) -> None:
     A checkpoint represents an interrupted previous run. Once the user submits a
     new message, resuming that stale tool state would mix two different turns.
     """
-    checkpoint = checkpoint_manager.load(session_id)
+    checkpoint = checkpoint_orchestrator.load(session_id)
     if not checkpoint:
         return
 
@@ -283,7 +285,7 @@ def _discard_stale_checkpoint(session_id: str) -> None:
         session_id,
         checkpoint.step,
     )
-    checkpoint_manager.clear(session_id)
+    checkpoint_orchestrator.clear(session_id)
 
 
 def _append_user_turn(
@@ -319,14 +321,13 @@ def _run_agent(
     hooks: CompositeRunnerHooks | None = None,
     resume_checkpoint: Checkpoint | None = None,
 ) -> AgentRunResult:
-    """Call AgentRunner with the app-level registry and checkpoint manager."""
+    """Call AgentRunner with the app-level registry."""
     return runner.run(
         agent=agent,
         history=context_envelope.messages,
         tool_registry=tool_registry,
         hooks=hooks,
         session_id=session_id,
-        checkpoint_manager=checkpoint_manager,
         resume_checkpoint=resume_checkpoint,
     )
 

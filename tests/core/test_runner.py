@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agents.chat_agent import ChatAgent
-from app.core.checkpoint import Checkpoint, CheckpointManager, ToolExecutionRecord
+from app.core.checkpoint import Checkpoint, CheckpointManager, CheckpointOrchestrator, ToolExecutionRecord
 from app.core.hooks import BaseRunnerHooks
 from app.core.runner import AgentRunner
 from app.core.tool_registry import ToolRegistry
@@ -86,13 +86,14 @@ def test_runner_clears_checkpoint_on_success(monkeypatch):
 
     fake_client.responses.create = fake_create
 
-    runner = AgentRunner(client=fake_client, max_steps=3)
+    checkpoint_manager = CheckpointManager()
+    orchestrator = CheckpointOrchestrator(checkpoint_manager)
+    runner = AgentRunner(client=fake_client, max_steps=3, checkpoint=orchestrator)
     agent = ChatAgent(
         name="chat-agent",
         model="test-model",
         system_prompt="You are a test agent."
     )
-    checkpoint_manager = CheckpointManager()
     session_id = "session-with-stale-checkpoint"
     checkpoint_manager.save(
         session_id=session_id,
@@ -106,7 +107,6 @@ def test_runner_clears_checkpoint_on_success(monkeypatch):
         history=[{"role": "user", "content": "hello"}],
         tool_registry=None,
         session_id=session_id,
-        checkpoint_manager=checkpoint_manager,
     )
 
     assert result["success"] is True
@@ -121,13 +121,17 @@ def test_runner_clears_checkpoint_when_llm_returns_no_tool_calls():
         output_text="final without tools",
     )
 
-    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    checkpoint_manager = CheckpointManager()
+    orchestrator = CheckpointOrchestrator(checkpoint_manager)
+    runner = AgentRunner(
+        client=fake_client, max_steps=3, enable_tracing=False,
+        checkpoint=orchestrator,
+    )
     agent = ChatAgent(
         name="chat-agent",
         model="test-model",
         system_prompt="You are a test agent.",
     )
-    checkpoint_manager = CheckpointManager()
     session_id = "no-tool-final"
 
     result = runner.run(
@@ -135,7 +139,6 @@ def test_runner_clears_checkpoint_when_llm_returns_no_tool_calls():
         history=[{"role": "user", "content": "hello"}],
         tool_registry=None,
         session_id=session_id,
-        checkpoint_manager=checkpoint_manager,
     )
 
     assert result["success"] is True
@@ -177,13 +180,17 @@ def test_runner_resumes_tool_output_without_repeating_tool(monkeypatch):
         return final_response
 
     fake_client.responses.create = fake_create
-    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    checkpoint_manager = CheckpointManager()
+    orchestrator = CheckpointOrchestrator(checkpoint_manager)
+    runner = AgentRunner(
+        client=fake_client, max_steps=3, enable_tracing=False,
+        checkpoint=orchestrator,
+    )
     agent = ChatAgent(
         name="chat-agent",
         model="test-model",
         system_prompt="You are a test agent.",
     )
-    checkpoint_manager = CheckpointManager()
     session_id = "resume-tool-output"
 
     with pytest.raises(RuntimeError):
@@ -192,7 +199,6 @@ def test_runner_resumes_tool_output_without_repeating_tool(monkeypatch):
             history=[{"role": "user", "content": "run side effect"}],
             tool_registry=registry,
             session_id=session_id,
-            checkpoint_manager=checkpoint_manager,
         )
 
     checkpoint = checkpoint_manager.load(session_id)
@@ -205,7 +211,6 @@ def test_runner_resumes_tool_output_without_repeating_tool(monkeypatch):
         history=[{"role": "user", "content": "run side effect"}],
         tool_registry=registry,
         session_id=session_id,
-        checkpoint_manager=checkpoint_manager,
         resume_checkpoint=checkpoint,
     )
 
@@ -232,13 +237,17 @@ def test_runner_resumes_tool_requested_checkpoint_by_calling_tool_once():
         output_text="lookup complete",
     )
 
-    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    checkpoint_manager = CheckpointManager()
+    orchestrator = CheckpointOrchestrator(checkpoint_manager)
+    runner = AgentRunner(
+        client=fake_client, max_steps=3, enable_tracing=False,
+        checkpoint=orchestrator,
+    )
     agent = ChatAgent(
         name="chat-agent",
         model="test-model",
         system_prompt="You are a test agent.",
     )
-    checkpoint_manager = CheckpointManager()
     session_id = "resume-tool-requested"
     checkpoint = Checkpoint(
         step=1,
@@ -264,7 +273,6 @@ def test_runner_resumes_tool_requested_checkpoint_by_calling_tool_once():
         history=[{"role": "user", "content": "lookup"}],
         tool_registry=registry,
         session_id=session_id,
-        checkpoint_manager=checkpoint_manager,
         resume_checkpoint=checkpoint,
     )
 
@@ -291,13 +299,17 @@ def test_runner_does_not_retry_running_non_idempotent_tool():
         "LLM should not be called before unresolved non-idempotent tool"
     )
 
-    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    checkpoint_manager = CheckpointManager()
+    orchestrator = CheckpointOrchestrator(checkpoint_manager)
+    runner = AgentRunner(
+        client=fake_client, max_steps=3, enable_tracing=False,
+        checkpoint=orchestrator,
+    )
     agent = ChatAgent(
         name="chat-agent",
         model="test-model",
         system_prompt="You are a test agent.",
     )
-    checkpoint_manager = CheckpointManager()
     session_id = "resume-non-idempotent-running"
     checkpoint = Checkpoint(
         step=1,
@@ -325,7 +337,6 @@ def test_runner_does_not_retry_running_non_idempotent_tool():
         history=[{"role": "user", "content": "send email"}],
         tool_registry=registry,
         session_id=session_id,
-        checkpoint_manager=checkpoint_manager,
         resume_checkpoint=checkpoint,
     )
 
