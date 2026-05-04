@@ -48,9 +48,10 @@
 | `/chat` | POST | 普通对话接口 |
 | `/chat/stream` | POST | SSE 流式对话接口 |
 | `/.well-known/agent-card.json` | GET | A2A Agent Card |
-| `/a2a/v1/extendedAgentCard` | GET | A2A 扩展 Agent Card |
-| `/a2a/v1/message:send` | POST | A2A 消息发送 |
-| `/a2a/v1/message:stream` | POST | A2A 消息流 |
+| `/a2a/v1/rpc` | POST | A2A 1.0 JSON-RPC |
+| `/a2a/v1/extendedAgentCard` | GET | 兼容旧 HTTP+JSON 的 A2A 扩展 Agent Card |
+| `/a2a/v1/message:send` | POST | 兼容旧 HTTP+JSON 的 A2A 消息发送 |
+| `/a2a/v1/message:stream` | POST | 兼容旧 HTTP+JSON 的 A2A 消息流 |
 | `/a2a/v1/tasks/{task_id}` | GET | 查询 A2A Task |
 | `/a2a/v1/tasks` | GET | 查询 A2A Task 列表 |
 | `/a2a/v1/tasks/{task_id}:cancel` | POST | 取消 A2A Task |
@@ -67,8 +68,9 @@
 |------|------|
 | Agent Card | 已实现 |
 | Extended Agent Card + Bearer Auth | 已实现 |
-| HTTP+JSON `message:send` | 已实现 |
-| SSE `message:stream` | 已实现 |
+| JSON-RPC transport | 已实现 |
+| HTTP+JSON compatibility endpoints | 已实现 |
+| SSE streaming/subscription | 已实现 |
 | Task query/list/cancel/subscribe | 已实现 |
 | Task lifecycle protection | 已实现 |
 | Event broker fan-out | 已实现 |

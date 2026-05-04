@@ -10,7 +10,7 @@ MyAgent 实现了一套可扩展的 LLM Agent 后端运行时：
 
 - **对话接口**：`/chat` 和 `/chat/stream` 支持普通对话与 SSE 流式响应。
 - **工具调用**：`ToolRegistry` 支持 OpenAI tools schema、Pydantic 参数校验、同步/异步工具调用。
-- **A2A 协议**：作为 A2A Server 暴露 Agent Card、message/task API、任务订阅；作为 A2A Client 调用远端 Agent，并可把远端 Agent 注册为本地工具。
+- **A2A 协议**：支持 A2A 1.0 JSON-RPC Server/Client，暴露 Agent Card、message/task API、任务订阅；旧 HTTP+JSON REST 端点继续兼容。
 - **MCP 接入**：支持 stdio/SSE MCP Server 注册、远程工具发现与调用。
 - **运行时扩展**：Hooks 和 Middleware 可插入日志、SSE、安全过滤、历史裁剪、权限控制等逻辑。
 - **工程治理**：支持超时、重试、Token Bucket 限流、Circuit Breaker 熔断、OpenTelemetry tracing。
@@ -24,8 +24,8 @@ MyAgent 实现了一套可扩展的 LLM Agent 后端运行时：
 |------|------|
 | Agent Runner | 基于 OpenAI Responses API 的多步推理 + 工具调用循环 |
 | Tool Registry | 管理本地工具、远程 A2A Agent 工具、MCP 工具 |
-| A2A Server | `/.well-known/agent-card.json`、`/a2a/v1/message:*`、`/a2a/v1/tasks*` |
-| A2A Client | 发现远端 Agent Card、发送消息、消费 SSE、订阅/取消远端 Task |
+| A2A Server | `/.well-known/agent-card.json`、`/a2a/v1/rpc`、兼容 `/a2a/v1/message:*` 与 `/a2a/v1/tasks*` |
+| A2A Client | 发现远端 Agent Card，优先 JSON-RPC，发送消息、消费 SSE、订阅/取消远端 Task |
 | SSE Streaming | `/chat/stream` 与 A2A streaming/subscription 都基于 SSE |
 | Cooperative Cancel | A2A cancel 通过 token 通知 Runner 停止后续 LLM/tool |
 | Hooks/Middleware | 生命周期观察和执行前拦截 |
@@ -81,9 +81,10 @@ A2A_EXTENDED_CARD_TOKEN=
 | `POST` | `/chat` | 普通对话 |
 | `POST` | `/chat/stream` | SSE 流式对话 |
 | `GET` | `/.well-known/agent-card.json` | A2A Agent Card |
-| `GET` | `/a2a/v1/extendedAgentCard` | 认证扩展 Agent Card |
-| `POST` | `/a2a/v1/message:send` | A2A 消息发送 |
-| `POST` | `/a2a/v1/message:stream` | A2A 消息流式执行 |
+| `POST` | `/a2a/v1/rpc` | A2A 1.0 JSON-RPC |
+| `GET` | `/a2a/v1/extendedAgentCard` | 兼容旧 HTTP+JSON 的认证扩展 Agent Card |
+| `POST` | `/a2a/v1/message:send` | 兼容旧 HTTP+JSON 的 A2A 消息发送 |
+| `POST` | `/a2a/v1/message:stream` | 兼容旧 HTTP+JSON 的 A2A 消息流式执行 |
 | `GET` | `/a2a/v1/tasks/{task_id}` | 查询 A2A Task |
 | `GET` | `/a2a/v1/tasks` | 查询 A2A Task 列表 |
 | `POST` | `/a2a/v1/tasks/{task_id}:cancel` | 取消 A2A Task |

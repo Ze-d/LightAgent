@@ -31,6 +31,25 @@ def _agent_card_payload() -> dict:
     }
 
 
+def _jsonrpc_agent_card_payload() -> dict:
+    payload = _agent_card_payload()
+    payload.pop("url", None)
+    payload.pop("protocolVersion", None)
+    payload["supportedInterfaces"] = [
+        {
+            "url": "http://remote.test/a2a/v1/rpc",
+            "protocolBinding": "JSONRPC",
+            "protocolVersion": "1.0",
+        },
+        {
+            "url": "http://remote.test/a2a/v1",
+            "protocolBinding": "HTTP+JSON",
+            "protocolVersion": "1.0",
+        }
+    ]
+    return payload
+
+
 def _task_payload(
     *,
     task_id: str = "task-1",
@@ -81,6 +100,36 @@ def test_a2a_client_discovers_agent_card_and_sends_text():
     assert card.name == "remote-agent"
     assert seen["request"]["message"]["parts"][0]["text"] == "hello"
     assert seen["request"]["message"]["contextId"] == "ctx-1"
+    assert response.task.status.state == TaskState.completed
+    assert extract_text_from_send_response(response) == "remote answer"
+
+
+def test_a2a_client_prefers_jsonrpc_when_advertised():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/.well-known/agent-card.json":
+            return httpx.Response(200, json=_jsonrpc_agent_card_payload())
+        if request.url.path == "/a2a/v1/rpc":
+            payload = json.loads(request.content.decode("utf-8"))
+            seen["request"] = payload
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"task": _task_payload()},
+                },
+            )
+        return httpx.Response(404)
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = A2AClient("http://remote.test", http_client=http_client)
+
+    response = client.send_text("hello rpc", context_id="ctx-rpc")
+
+    assert seen["request"]["method"] == "SendMessage"
+    assert seen["request"]["params"]["message"]["parts"][0]["text"] == "hello rpc"
     assert response.task.status.state == TaskState.completed
     assert extract_text_from_send_response(response) == "remote answer"
 

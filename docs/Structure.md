@@ -91,7 +91,9 @@ AgentRunResult
 ## 4. A2A Server 数据流
 
 ```text
-POST /a2a/v1/message:send 或 message:stream
+POST /a2a/v1/rpc
+    ├── SendMessage
+    └── SendStreamingMessage
     │
     ▼
 A2A Message
@@ -132,7 +134,7 @@ register_remote_a2a_agent_tool 注册的 ToolSpec
 A2AClient
     │
     ├── GET /.well-known/agent-card.json
-    ├── POST /a2a/v1/message:send
+    ├── POST /a2a/v1/rpc
     └── 解析 Task/Artifact 文本
     │
     ▼
@@ -183,9 +185,10 @@ A2AClient
 | `POST` | `/chat` | 普通对话 |
 | `POST` | `/chat/stream` | SSE 流式对话 |
 | `GET` | `/.well-known/agent-card.json` | A2A Agent Card |
-| `GET` | `/a2a/v1/extendedAgentCard` | A2A 扩展 Agent Card |
-| `POST` | `/a2a/v1/message:send` | A2A 消息发送 |
-| `POST` | `/a2a/v1/message:stream` | A2A 消息流 |
+| `POST` | `/a2a/v1/rpc` | A2A 1.0 JSON-RPC |
+| `GET` | `/a2a/v1/extendedAgentCard` | 兼容旧 HTTP+JSON 的 A2A 扩展 Agent Card |
+| `POST` | `/a2a/v1/message:send` | 兼容旧 HTTP+JSON 的 A2A 消息发送 |
+| `POST` | `/a2a/v1/message:stream` | 兼容旧 HTTP+JSON 的 A2A 消息流 |
 | `GET` | `/a2a/v1/tasks/{task_id}` | 查询 A2A Task |
 | `GET` | `/a2a/v1/tasks` | 查询 A2A Task 列表 |
 | `POST` | `/a2a/v1/tasks/{task_id}:cancel` | 取消 A2A Task |

@@ -15,15 +15,22 @@ def test_build_agent_card_uses_aliases_and_public_url():
 
     assert payload["name"] == "chat-agent"
     assert payload["version"] == "1.2.3"
-    assert payload["url"] == "http://example.test/a2a/v1"
-    assert payload["protocolVersion"] == A2A_PROTOCOL_VERSION
+    assert "url" not in payload
+    assert "protocolVersion" not in payload
+    assert "preferredTransport" not in payload
     assert payload["supportedInterfaces"] == [
+        {
+            "url": "http://example.test/a2a/v1/rpc",
+            "protocolBinding": "JSONRPC",
+            "protocolVersion": A2A_PROTOCOL_VERSION,
+        },
         {
             "url": "http://example.test/a2a/v1",
             "protocolBinding": "HTTP+JSON",
             "protocolVersion": A2A_PROTOCOL_VERSION,
         }
     ]
+    assert payload.get("additionalInterfaces") == []
     assert payload["capabilities"]["streaming"] is True
     assert payload["capabilities"]["extendedAgentCard"] is False
     assert payload["securitySchemes"] == {}

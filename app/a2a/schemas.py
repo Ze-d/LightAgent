@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 A2A_PROTOCOL_VERSION = "1.0"
 A2A_REST_INTERFACE_URL = "/a2a/v1"
+A2A_JSONRPC_INTERFACE_URL = "/a2a/v1/rpc"
+JSONRPC_VERSION = "2.0"
 TEXT_PLAIN = "text/plain"
 
 
@@ -19,7 +21,9 @@ class A2ABaseModel(BaseModel):
 
 class AgentInterface(A2ABaseModel):
     url: str
-    protocol_binding: Literal["HTTP+JSON"] = Field(alias="protocolBinding")
+    protocol_binding: Literal["JSONRPC", "GRPC", "HTTP+JSON"] | str = Field(
+        alias="protocolBinding",
+    )
     protocol_version: str = Field(alias="protocolVersion")
     tenant: str | None = None
 
@@ -51,7 +55,7 @@ class AgentSkill(A2ABaseModel):
     examples: list[str] = Field(default_factory=list)
     input_modes: list[str] = Field(default_factory=list, alias="inputModes")
     output_modes: list[str] = Field(default_factory=list, alias="outputModes")
-    security_requirements: list[dict[str, list[str]]] = Field(
+    security_requirements: list[dict[str, Any]] = Field(
         default_factory=list,
         alias="securityRequirements",
     )
@@ -67,9 +71,9 @@ class AgentCard(A2ABaseModel):
     name: str
     description: str
     version: str
-    url: str
+    url: str | None = None
     provider: AgentProvider | None = None
-    protocol_version: str = Field(alias="protocolVersion")
+    protocol_version: str | None = Field(default=None, alias="protocolVersion")
     preferred_transport: str | None = Field(default=None, alias="preferredTransport")
     supported_interfaces: list[AgentInterface] = Field(
         default_factory=list,
@@ -84,7 +88,7 @@ class AgentCard(A2ABaseModel):
         default_factory=dict,
         alias="securitySchemes",
     )
-    security_requirements: list[dict[str, list[str]]] = Field(
+    security_requirements: list[dict[str, Any]] = Field(
         default_factory=list,
         alias="securityRequirements",
     )
@@ -150,6 +154,7 @@ class Artifact(A2ABaseModel):
     name: str | None = None
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    extensions: list[str] = Field(default_factory=list)
 
 
 class TaskStatus(A2ABaseModel):
@@ -165,6 +170,9 @@ class Task(A2ABaseModel):
     artifacts: list[Artifact] = Field(default_factory=list)
     history: list[Message] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = Field(default=None, alias="createdAt")
+    last_modified: str | None = Field(default=None, alias="lastModified")
+    extensions: list[str] = Field(default_factory=list)
 
 
 class TaskStatusUpdateEvent(A2ABaseModel):
@@ -263,3 +271,70 @@ class ListTasksResponse(A2ABaseModel):
     total_size: int = Field(alias="totalSize")
     page_size: int = Field(alias="pageSize")
     next_page_token: str = Field(default="", alias="nextPageToken")
+
+
+JsonRpcId = str | int | None
+
+
+class JSONRPCRequest(A2ABaseModel):
+    jsonrpc: Literal["2.0"] = JSONRPC_VERSION
+    id: JsonRpcId = None
+    method: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class JSONRPCError(A2ABaseModel):
+    code: int
+    message: str
+    data: Any | None = None
+
+
+class JSONRPCResponse(A2ABaseModel):
+    jsonrpc: Literal["2.0"] = JSONRPC_VERSION
+    id: JsonRpcId = None
+    result: Any | None = None
+    error: JSONRPCError | None = None
+
+    @model_validator(mode="after")
+    def require_result_or_error(self) -> "JSONRPCResponse":
+        if (self.result is None) == (self.error is None):
+            raise ValueError("JSONRPCResponse must contain result or error")
+        return self
+
+
+class GetTaskRequest(A2ABaseModel):
+    id: str
+    tenant: str | None = None
+    history_length: int | None = Field(default=None, alias="historyLength")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ListTasksRequest(A2ABaseModel):
+    tenant: str | None = None
+    context_id: str | None = Field(default=None, alias="contextId")
+    status: TaskState | None = None
+    state: TaskState | None = None
+    page_size: int = Field(default=50, alias="pageSize")
+    page_token: str = Field(default="", alias="pageToken")
+    history_length: int | None = Field(default=None, alias="historyLength")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def resolved_state(self) -> TaskState | None:
+        return self.status or self.state
+
+
+class CancelTaskJSONRPCRequest(A2ABaseModel):
+    id: str
+    tenant: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SubscribeTaskRequest(A2ABaseModel):
+    id: str
+    tenant: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GetExtendedAgentCardRequest(A2ABaseModel):
+    tenant: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

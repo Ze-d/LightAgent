@@ -93,13 +93,18 @@ curl http://localhost:8000/.well-known/agent-card.json
 ### 发送 A2A 消息
 
 ```bash
-curl -X POST http://localhost:8000/a2a/v1/message:send \
+curl -X POST http://localhost:8000/a2a/v1/rpc \
   -H "Content-Type: application/json" \
   -d '{
-    "message": {
-      "role": "ROLE_USER",
-      "parts": [{"text": "介绍一下你的能力"}],
-      "contextId": "demo-context"
+    "jsonrpc": "2.0",
+    "id": "req-1",
+    "method": "SendMessage",
+    "params": {
+      "message": {
+        "role": "ROLE_USER",
+        "parts": [{"text": "介绍一下你的能力"}],
+        "contextId": "demo-context"
+      }
     }
   }'
 ```
@@ -107,12 +112,17 @@ curl -X POST http://localhost:8000/a2a/v1/message:send \
 ### A2A 流式执行
 
 ```bash
-curl -N -X POST http://localhost:8000/a2a/v1/message:stream \
+curl -N -X POST http://localhost:8000/a2a/v1/rpc \
   -H "Content-Type: application/json" \
   -d '{
-    "message": {
-      "role": "ROLE_USER",
-      "parts": [{"text": "北京现在几点？"}]
+    "jsonrpc": "2.0",
+    "id": "stream-1",
+    "method": "SendStreamingMessage",
+    "params": {
+      "message": {
+        "role": "ROLE_USER",
+        "parts": [{"text": "北京现在几点？"}]
+      }
     }
   }'
 ```
@@ -190,9 +200,10 @@ pytest tests/core/test_runner.py -q
 | `POST` | `/chat` | 普通对话 |
 | `POST` | `/chat/stream` | SSE 流式对话 |
 | `GET` | `/.well-known/agent-card.json` | A2A Agent Card |
-| `GET` | `/a2a/v1/extendedAgentCard` | A2A 扩展 Agent Card |
-| `POST` | `/a2a/v1/message:send` | A2A 消息发送 |
-| `POST` | `/a2a/v1/message:stream` | A2A 消息流 |
+| `POST` | `/a2a/v1/rpc` | A2A 1.0 JSON-RPC |
+| `GET` | `/a2a/v1/extendedAgentCard` | 兼容旧 HTTP+JSON 的 A2A 扩展 Agent Card |
+| `POST` | `/a2a/v1/message:send` | 兼容旧 HTTP+JSON 的 A2A 消息发送 |
+| `POST` | `/a2a/v1/message:stream` | 兼容旧 HTTP+JSON 的 A2A 消息流 |
 | `GET` | `/a2a/v1/tasks/{task_id}` | 查询 A2A Task |
 | `GET` | `/a2a/v1/tasks` | 查询 A2A Task 列表 |
 | `POST` | `/a2a/v1/tasks/{task_id}:cancel` | 取消 A2A Task |

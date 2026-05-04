@@ -1,4 +1,5 @@
 from app.a2a.schemas import (
+    A2A_JSONRPC_INTERFACE_URL,
     A2A_PROTOCOL_VERSION,
     A2A_REST_INTERFACE_URL,
     TEXT_PLAIN,
@@ -125,22 +126,26 @@ def build_agent_card(
     skill_registry: SkillRegistry | None = None,
     tool_registry: ToolRegistry | None = None,
 ) -> AgentCard:
-    interface_url = _join_url(public_base_url, A2A_REST_INTERFACE_URL)
+    jsonrpc_url = _join_url(public_base_url, A2A_JSONRPC_INTERFACE_URL)
+    rest_url = _join_url(public_base_url, A2A_REST_INTERFACE_URL)
     resolved_security_schemes = dict(security_schemes or {})
     resolved_security_requirements = list(security_requirements or [])
     return AgentCard(
         name=agent_name,
         description=description,
         version=version,
-        url=interface_url,
         provider=AgentProvider(
             organization=provider_name,
             url=public_base_url.rstrip("/") or None,
         ),
-        protocolVersion=A2A_PROTOCOL_VERSION,
         supportedInterfaces=[
             AgentInterface(
-                url=interface_url,
+                url=jsonrpc_url,
+                protocolBinding="JSONRPC",
+                protocolVersion=A2A_PROTOCOL_VERSION,
+            ),
+            AgentInterface(
+                url=rest_url,
                 protocolBinding="HTTP+JSON",
                 protocolVersion=A2A_PROTOCOL_VERSION,
             )

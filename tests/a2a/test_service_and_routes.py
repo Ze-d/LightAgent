@@ -94,8 +94,12 @@ def test_agent_card_uses_request_base_url_when_provider_accepts_it():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["url"] == "http://testserver/a2a/v1"
-    assert payload["supportedInterfaces"][0]["url"] == "http://testserver/a2a/v1"
+    assert "url" not in payload
+    assert "protocolVersion" not in payload
+    assert payload["supportedInterfaces"][0]["url"] == "http://testserver/a2a/v1/rpc"
+    assert payload["supportedInterfaces"][0]["protocolBinding"] == "JSONRPC"
+    assert payload["supportedInterfaces"][1]["url"] == "http://testserver/a2a/v1"
+    assert payload["supportedInterfaces"][1]["protocolBinding"] == "HTTP+JSON"
     assert payload["capabilities"]["extendedAgentCard"] is True
 
 
@@ -142,6 +146,90 @@ def test_message_send_completes_task_and_gets_task():
     task_response = client.get(f"/a2a/v1/tasks/{task['id']}")
     assert task_response.status_code == 200
     assert task_response.json()["id"] == task["id"]
+
+
+def test_jsonrpc_send_message_and_get_task():
+    client = _client()
+
+    response = client.post(
+        "/a2a/v1/rpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-1",
+            "method": "SendMessage",
+            "params": {
+                "message": {
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "hello rpc"}],
+                    "contextId": "ctx-rpc",
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    task = payload["result"]["task"]
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["id"] == "rpc-1"
+    assert task["status"]["state"] == TaskState.completed
+    assert task["artifacts"][0]["parts"][0]["text"] == "echo: hello rpc in ctx-rpc"
+
+    task_response = client.post(
+        "/a2a/v1/rpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-2",
+            "method": "GetTask",
+            "params": {"id": task["id"]},
+        },
+    )
+
+    assert task_response.status_code == 200
+    assert task_response.json()["result"]["id"] == task["id"]
+
+
+def test_jsonrpc_invalid_method_returns_jsonrpc_error():
+    client = _client()
+
+    response = client.post(
+        "/a2a/v1/rpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-bad",
+            "method": "MissingMethod",
+            "params": {},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "rpc-bad"
+    assert payload["error"]["code"] == -32601
+
+
+def test_jsonrpc_invalid_params_returns_jsonrpc_error():
+    client = _client()
+
+    response = client.post(
+        "/a2a/v1/rpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-invalid",
+            "method": "SendMessage",
+            "params": {
+                "message": {
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "hello", "data": {"x": 1}}],
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "rpc-invalid"
+    assert payload["error"]["code"] == -32602
 
 
 def test_list_tasks_filters_by_context_id():
@@ -195,6 +283,36 @@ def test_message_stream_emits_task_artifact_and_final_status():
     assert '"task"' in body
     assert '"artifactUpdate"' in body
     assert '"statusUpdate"' in body
+    assert "TASK_STATE_COMPLETED" in body
+
+
+def test_jsonrpc_stream_message_wraps_sse_events():
+    client = _client()
+
+    with client.stream(
+        "POST",
+        "/a2a/v1/rpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-stream",
+            "method": "SendStreamingMessage",
+            "params": {
+                "message": {
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "stream rpc"}],
+                    "contextId": "ctx-stream-rpc",
+                }
+            },
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert '"jsonrpc"' in body
+    assert '"2.0"' in body
+    assert '"id"' in body
+    assert '"rpc-stream"' in body
+    assert '"result"' in body
     assert "TASK_STATE_COMPLETED" in body
 
 

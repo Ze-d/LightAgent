@@ -247,6 +247,9 @@ A2A API 基础路径：
 /a2a/v1
 ```
 
+当前实现按 A2A `1.0.0` 暴露 JSON-RPC transport，入口为
+`POST /a2a/v1/rpc`。旧 HTTP+JSON REST 端点仍保留用于兼容。
+
 当前实现只支持 text part。`data`、`raw`、`url` 等非文本 part 会被拒绝。
 
 ### 5.1 核心数据模型
@@ -288,6 +291,8 @@ A2A API 基础路径：
 | `artifacts` | Artifact[] | 输出 artifact |
 | `history` | Message[] | Task 消息历史 |
 | `metadata` | object | 元数据，例如 steps、error、tool_events |
+| `createdAt` | string/null | Task 创建时间 |
+| `lastModified` | string/null | Task 最近更新时间 |
 
 #### TaskState
 
@@ -321,9 +326,12 @@ curl http://localhost:8000/.well-known/agent-card.json
   "name": "chat-agent",
   "description": "MyAgent is a tool-aware conversational agent with session memory, checkpoint recovery, and streaming execution events.",
   "version": "0.1.0",
-  "url": "http://localhost:8000/a2a/v1",
-  "protocolVersion": "1.0",
   "supportedInterfaces": [
+    {
+      "url": "http://localhost:8000/a2a/v1/rpc",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    },
     {
       "url": "http://localhost:8000/a2a/v1",
       "protocolBinding": "HTTP+JSON",
@@ -341,9 +349,48 @@ curl http://localhost:8000/.well-known/agent-card.json
 }
 ```
 
+### POST `/a2a/v1/rpc`
+
+A2A `1.0.0` JSON-RPC 入口。支持的方法：
+
+| method | params | result |
+|------|------|------|
+| `SendMessage` | SendMessageRequest | SendMessageResponse |
+| `SendStreamingMessage` | SendMessageRequest | SSE，每条 data 为 JSON-RPC response，`result` 为 StreamResponse |
+| `GetTask` | `{ "id": "...", "historyLength": 2 }` | Task |
+| `ListTasks` | `{ "contextId": "...", "status": "TASK_STATE_COMPLETED" }` | ListTasksResponse |
+| `CancelTask` | `{ "id": "...", "metadata": {} }` | Task |
+| `SubscribeToTask` | `{ "id": "..." }` | SSE，每条 data 为 JSON-RPC response，`result` 为 StreamResponse |
+| `GetExtendedAgentCard` | `{}` | AgentCard |
+
+**请求示例**
+
+```bash
+curl -X POST http://localhost:8000/a2a/v1/rpc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "req-1",
+    "method": "SendMessage",
+    "params": {
+      "message": {
+        "role": "ROLE_USER",
+        "parts": [{"text": "帮我计算 2 + 3"}],
+        "contextId": "demo-context"
+      },
+      "configuration": {
+        "acceptedOutputModes": ["text/plain"],
+        "historyLength": 2,
+        "returnImmediately": false
+      }
+    }
+  }'
+```
+
 ### GET `/a2a/v1/extendedAgentCard`
 
-返回认证扩展 Agent Card。仅当设置 `A2A_EXTENDED_CARD_TOKEN` 时可用。
+兼容旧 HTTP+JSON 的认证扩展 Agent Card。A2A 1.0 客户端优先使用
+JSON-RPC `GetExtendedAgentCard`。仅当设置 `A2A_EXTENDED_CARD_TOKEN` 时可用。
 
 **请求示例**
 
@@ -376,7 +423,10 @@ curl http://localhost:8000/a2a/v1/extendedAgentCard \
 
 ### POST `/a2a/v1/message:send`
 
-发送一条 A2A 消息并返回 `SendMessageResponse`。默认阻塞到 Task 终态；如果设置 `configuration.returnImmediately=true`，会立即返回 `TASK_STATE_WORKING` 的 Task，并在后台继续执行。
+兼容旧 HTTP+JSON 的发送端点。新客户端应优先调用 JSON-RPC
+`SendMessage`。默认阻塞到 Task 终态；如果设置
+`configuration.returnImmediately=true`，会立即返回 `TASK_STATE_WORKING`
+的 Task，并在后台继续执行。
 
 **请求模型：SendMessageRequest**
 
@@ -460,7 +510,8 @@ curl -X POST http://localhost:8000/a2a/v1/message:send \
 
 ### POST `/a2a/v1/message:stream`
 
-创建 Task，并通过 SSE 返回 `StreamResponse`。
+兼容旧 HTTP+JSON 的流式端点。新客户端应优先调用 JSON-RPC
+`SendStreamingMessage`。该端点创建 Task，并通过 SSE 返回 `StreamResponse`。
 
 **请求示例**
 

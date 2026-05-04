@@ -95,6 +95,7 @@ class InMemoryA2ATaskStore:
                     raise TaskConflictError(
                         "message contextId does not match existing task"
                     )
+                now = utc_now_iso()
                 task_id = task.id
                 bound_message = self._bind_message(
                     message,
@@ -105,13 +106,15 @@ class InMemoryA2ATaskStore:
                 task.status = TaskStatus(
                     state=TaskState.submitted,
                     message=bound_message,
-                    timestamp=utc_now_iso(),
+                    timestamp=now,
                 )
+                task.last_modified = now
                 task.metadata.update(metadata or {})
                 return self._copy(task), bound_message
 
             task_id = str(uuid4())
             context_id = message.context_id or str(uuid4())
+            now = utc_now_iso()
             bound_message = self._bind_message(
                 message,
                 task_id=task_id,
@@ -123,10 +126,12 @@ class InMemoryA2ATaskStore:
                 status=TaskStatus(
                     state=TaskState.submitted,
                     message=bound_message,
-                    timestamp=utc_now_iso(),
+                    timestamp=now,
                 ),
                 history=[bound_message],
                 metadata=dict(metadata or {}),
+                createdAt=now,
+                lastModified=now,
             )
             self._tasks[task_id] = task
             return self._copy(task), bound_message
@@ -183,11 +188,13 @@ class InMemoryA2ATaskStore:
                 raise TaskNotFoundError(task_id)
             if self._is_terminal(task):
                 return self._copy(task)
+            now = utc_now_iso()
             task.status = TaskStatus(
                 state=TaskState.working,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
+            task.last_modified = now
             return self._copy(task)
 
     def complete(
@@ -205,6 +212,7 @@ class InMemoryA2ATaskStore:
             if self._is_terminal(task):
                 return self._copy(task)
 
+            now = utc_now_iso()
             message = Message(
                 role=A2ARole.agent,
                 messageId=str(uuid4()),
@@ -216,9 +224,10 @@ class InMemoryA2ATaskStore:
             task.status = TaskStatus(
                 state=TaskState.completed,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
             task.artifacts = list(artifacts or [])
+            task.last_modified = now
             task.metadata.update(metadata or {})
             return self._copy(task)
 
@@ -236,6 +245,7 @@ class InMemoryA2ATaskStore:
             if self._is_terminal(task):
                 return self._copy(task)
 
+            now = utc_now_iso()
             message = Message(
                 role=A2ARole.agent,
                 messageId=str(uuid4()),
@@ -247,8 +257,9 @@ class InMemoryA2ATaskStore:
             task.status = TaskStatus(
                 state=TaskState.failed,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
+            task.last_modified = now
             task.metadata.update(metadata or {})
             return self._copy(task)
 
@@ -275,6 +286,7 @@ class InMemoryA2ATaskStore:
                     f"Task is already terminal: {task.status.state}"
                 )
 
+            now = utc_now_iso()
             message = Message(
                 role=A2ARole.agent,
                 messageId=str(uuid4()),
@@ -286,8 +298,9 @@ class InMemoryA2ATaskStore:
             task.status = TaskStatus(
                 state=TaskState.canceled,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
+            task.last_modified = now
             task.metadata.update(metadata or {})
             return self._copy(task)
 
@@ -347,6 +360,7 @@ class SQLiteA2ATaskStore:
                     raise TaskConflictError(
                         "message contextId does not match existing task"
                     )
+                now = utc_now_iso()
                 bound_message = self._bind_message(
                     message,
                     task_id=task.id,
@@ -356,14 +370,16 @@ class SQLiteA2ATaskStore:
                 task.status = TaskStatus(
                     state=TaskState.submitted,
                     message=bound_message,
-                    timestamp=utc_now_iso(),
+                    timestamp=now,
                 )
+                task.last_modified = now
                 task.metadata.update(metadata or {})
                 self._save_task(task)
                 return self._copy(task), bound_message
 
             task_id = str(uuid4())
             context_id = message.context_id or str(uuid4())
+            now = utc_now_iso()
             bound_message = self._bind_message(
                 message,
                 task_id=task_id,
@@ -375,10 +391,12 @@ class SQLiteA2ATaskStore:
                 status=TaskStatus(
                     state=TaskState.submitted,
                     message=bound_message,
-                    timestamp=utc_now_iso(),
+                    timestamp=now,
                 ),
                 history=[bound_message],
                 metadata=dict(metadata or {}),
+                createdAt=now,
+                lastModified=now,
             )
             self._save_task(task)
             return self._copy(task), bound_message
@@ -442,11 +460,13 @@ class SQLiteA2ATaskStore:
             task = self._require_loaded(task_id)
             if self._is_terminal(task):
                 return self._copy(task)
+            now = utc_now_iso()
             task.status = TaskStatus(
                 state=TaskState.working,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
+            task.last_modified = now
             self._save_task(task)
             return self._copy(task)
 
@@ -463,6 +483,7 @@ class SQLiteA2ATaskStore:
             if self._is_terminal(task):
                 return self._copy(task)
 
+            now = utc_now_iso()
             message = Message(
                 role=A2ARole.agent,
                 messageId=str(uuid4()),
@@ -474,9 +495,10 @@ class SQLiteA2ATaskStore:
             task.status = TaskStatus(
                 state=TaskState.completed,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
             task.artifacts = list(artifacts or [])
+            task.last_modified = now
             task.metadata.update(metadata or {})
             self._save_task(task)
             return self._copy(task)
@@ -493,6 +515,7 @@ class SQLiteA2ATaskStore:
             if self._is_terminal(task):
                 return self._copy(task)
 
+            now = utc_now_iso()
             message = Message(
                 role=A2ARole.agent,
                 messageId=str(uuid4()),
@@ -504,8 +527,9 @@ class SQLiteA2ATaskStore:
             task.status = TaskStatus(
                 state=TaskState.failed,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
+            task.last_modified = now
             task.metadata.update(metadata or {})
             self._save_task(task)
             return self._copy(task)
@@ -531,6 +555,7 @@ class SQLiteA2ATaskStore:
                     f"Task is already terminal: {task.status.state}"
                 )
 
+            now = utc_now_iso()
             message = Message(
                 role=A2ARole.agent,
                 messageId=str(uuid4()),
@@ -542,8 +567,9 @@ class SQLiteA2ATaskStore:
             task.status = TaskStatus(
                 state=TaskState.canceled,
                 message=message,
-                timestamp=utc_now_iso(),
+                timestamp=now,
             )
+            task.last_modified = now
             task.metadata.update(metadata or {})
             self._save_task(task)
             return self._copy(task)

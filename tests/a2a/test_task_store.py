@@ -22,6 +22,8 @@ def test_task_store_prepares_new_task_for_message():
     assert task.id
     assert task.context_id == "ctx-1"
     assert task.status.state == TaskState.submitted
+    assert task.created_at is not None
+    assert task.last_modified is not None
     assert bound_message.task_id == task.id
     assert bound_message.context_id == "ctx-1"
     assert store.require(task.id).history[0].parts[0].text == "hello"

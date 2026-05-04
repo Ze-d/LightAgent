@@ -11,6 +11,7 @@ import httpx
 from app.a2a.schemas import (
     A2ARole,
     AgentCard,
+    JSONRPCResponse,
     ListTasksResponse,
     Message,
     Part,
@@ -35,7 +36,7 @@ class A2AHTTPError(A2AClientError):
 
 
 class A2AClient:
-    """Synchronous A2A HTTP+JSON client."""
+    """Synchronous A2A client with JSON-RPC and legacy REST support."""
 
     def __init__(
         self,
@@ -103,6 +104,32 @@ class A2AClient:
         self._raise_for_error(response)
         return response.json()
 
+    def _request_jsonrpc(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> Any:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": str(uuid4()),
+            "method": method,
+            "params": params,
+        }
+        response = self._client.post(
+            self._jsonrpc_url(),
+            json=payload,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        self._raise_for_error(response)
+        rpc_response = JSONRPCResponse.model_validate(response.json())
+        if rpc_response.error is not None:
+            raise A2AClientError(
+                f"A2A JSON-RPC error {rpc_response.error.code}: "
+                f"{rpc_response.error.message}"
+            )
+        return rpc_response.result
+
     def get_agent_card(self, *, refresh: bool = False) -> AgentCard:
         if self._agent_card is not None and not refresh:
             return self._agent_card
@@ -117,31 +144,67 @@ class A2AClient:
         return self._agent_card
 
     def get_extended_agent_card(self) -> AgentCard:
-        service_base = self._service_base()
+        jsonrpc_url = self._interface_url("JSONRPC")
+        if jsonrpc_url is not None:
+            payload = self._request_jsonrpc("GetExtendedAgentCard", {})
+            return AgentCard.model_validate(payload)
+
         payload = self._request_json(
             "GET",
-            f"{service_base}/extendedAgentCard",
+            f"{self._service_base()}/extendedAgentCard",
         )
         return AgentCard.model_validate(payload)
 
-    def _service_base(self, agent_card: AgentCard | None = None) -> str:
+    def _interface_url(
+        self,
+        protocol_binding: str,
+        agent_card: AgentCard | None = None,
+    ) -> str | None:
         card = agent_card or self.get_agent_card()
         interfaces = [
             *card.supported_interfaces,
             *card.additional_interfaces,
         ]
         for interface in interfaces:
-            if interface.protocol_binding == "HTTP+JSON":
+            if interface.protocol_binding == protocol_binding:
                 return interface.url.rstrip("/")
+        return None
+
+    def _jsonrpc_url(self, agent_card: AgentCard | None = None) -> str:
+        interface_url = self._interface_url("JSONRPC", agent_card=agent_card)
+        if interface_url is not None:
+            return interface_url
+        card = agent_card or self.get_agent_card()
+        if card.preferred_transport == "JSONRPC" and card.url:
+            return card.url.rstrip("/")
+        raise A2AClientError("Agent Card does not advertise an A2A JSON-RPC URL")
+
+    def _has_jsonrpc_interface(self) -> bool:
+        try:
+            self._jsonrpc_url()
+            return True
+        except A2AClientError:
+            return False
+
+    def _service_base(self, agent_card: AgentCard | None = None) -> str:
+        interface_url = self._interface_url("HTTP+JSON", agent_card=agent_card)
+        if interface_url is not None:
+            return interface_url
+        card = agent_card or self.get_agent_card()
         if card.url:
             return card.url.rstrip("/")
         raise A2AClientError("Agent Card does not advertise an A2A HTTP+JSON URL")
 
     def send_message(self, request: SendMessageRequest) -> SendMessageResponse:
+        payload = request.model_dump(by_alias=True, exclude_none=True)
+        if self._has_jsonrpc_interface():
+            result = self._request_jsonrpc("SendMessage", payload)
+            return SendMessageResponse.model_validate(result)
+
         payload = self._request_json(
             "POST",
             f"{self._service_base()}/message:send",
-            json_body=request.model_dump(by_alias=True, exclude_none=True),
+            json_body=payload,
         )
         return SendMessageResponse.model_validate(payload)
 
@@ -172,6 +235,13 @@ class A2AClient:
         return self.send_message(request)
 
     def get_task(self, task_id: str, *, history_length: int | None = None) -> Task:
+        if self._has_jsonrpc_interface():
+            params: dict[str, Any] = {"id": task_id}
+            if history_length is not None:
+                params["historyLength"] = history_length
+            result = self._request_jsonrpc("GetTask", params)
+            return Task.model_validate(result)
+
         params = (
             {"historyLength": str(history_length)}
             if history_length is not None
@@ -199,13 +269,20 @@ class A2AClient:
         if context_id is not None:
             params["contextId"] = context_id
         if state is not None:
-            params["state"] = state
+            params["status"] = state
         if page_size is not None:
             params["pageSize"] = page_size
         if page_token is not None:
             params["pageToken"] = page_token
         if history_length is not None:
             params["historyLength"] = history_length
+
+        if self._has_jsonrpc_interface():
+            result = self._request_jsonrpc("ListTasks", params)
+            return ListTasksResponse.model_validate(result)
+
+        if state is not None:
+            params["state"] = params.pop("status")
 
         response = self._client.get(
             f"{self._service_base()}/tasks",
@@ -217,6 +294,10 @@ class A2AClient:
         return ListTasksResponse.model_validate(response.json())
 
     def cancel_task(self, task_id: str) -> Task:
+        if self._has_jsonrpc_interface():
+            result = self._request_jsonrpc("CancelTask", {"id": task_id})
+            return Task.model_validate(result)
+
         payload = self._request_json(
             "POST",
             f"{self._service_base()}/tasks/{task_id}:cancel",
@@ -225,9 +306,17 @@ class A2AClient:
         return Task.model_validate(payload)
 
     def stream_message(self, request: SendMessageRequest) -> Iterator[StreamResponse]:
+        payload = request.model_dump(by_alias=True, exclude_none=True)
+        if self._has_jsonrpc_interface():
+            yield from self._stream_jsonrpc_responses(
+                "SendStreamingMessage",
+                payload,
+            )
+            return
+
         yield from self._stream_responses(
             f"{self._service_base()}/message:stream",
-            request.model_dump(by_alias=True, exclude_none=True),
+            payload,
         )
 
     def stream_text(
@@ -249,10 +338,45 @@ class A2AClient:
         yield from self.stream_message(request)
 
     def subscribe_task(self, task_id: str) -> Iterator[StreamResponse]:
+        if self._has_jsonrpc_interface():
+            yield from self._stream_jsonrpc_responses(
+                "SubscribeToTask",
+                {"id": task_id},
+            )
+            return
+
         yield from self._stream_responses(
             f"{self._service_base()}/tasks/{task_id}:subscribe",
             {},
         )
+
+    def _stream_jsonrpc_responses(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> Iterator[StreamResponse]:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": str(uuid4()),
+            "method": method,
+            "params": params,
+        }
+        with self._client.stream(
+            "POST",
+            self._jsonrpc_url(),
+            json=payload,
+            headers=self._headers(accept="text/event-stream"),
+            timeout=self.timeout,
+        ) as response:
+            self._raise_for_error(response)
+            for data in self._iter_sse_data(response.iter_lines()):
+                rpc_response = JSONRPCResponse.model_validate_json(data)
+                if rpc_response.error is not None:
+                    raise A2AClientError(
+                        f"A2A JSON-RPC error {rpc_response.error.code}: "
+                        f"{rpc_response.error.message}"
+                    )
+                yield StreamResponse.model_validate(rpc_response.result)
 
     def _stream_responses(
         self,

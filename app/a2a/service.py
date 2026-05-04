@@ -116,7 +116,6 @@ class A2AService:
                     taskId=task.id,
                     contextId=task.context_id,
                     status=task.status,
-                    final=final,
                 )
             ),
         )
