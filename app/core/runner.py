@@ -45,6 +45,7 @@ from app.core.checkpoint import (
     ResumeContext,                                        # 恢复上下文
     ToolExecutionRecord,                                  # 工具执行记录
 )
+from app.core.cancellation import CancellationToken, RunnerCancelledError
 from app.core.context_builder import ProviderContextState  # Provider-side context state
 from app.core.skill_dispatcher import SkillDispatcher     # 技能调度器（处理 /skill 命令）
 
@@ -169,6 +170,39 @@ class AgentRunner:
     ) -> AgentRunResult:
         self._emit_run_end(hooks, agent, result, started_at, session_id)
         return result
+
+    def _finish_cancelled_run(
+        self,
+        hooks: BaseRunnerHooks | None,
+        agent: BaseAgent,
+        started_at: float,
+        session_id: str | None,
+        steps: int,
+        tool_events: list[ToolCallEvent],
+        reason: str,
+    ) -> AgentRunResult:
+        if self._checkpoint:
+            self._checkpoint.clear(session_id)
+        return self._finish_run(
+            hooks,
+            agent,
+            self._build_result(
+                answer=f"任务已取消：{reason}",
+                success=False,
+                steps=steps,
+                tool_events=tool_events,
+                error="cancelled",
+            ),
+            started_at,
+            session_id,
+        )
+
+    def _raise_if_cancelled(
+        self,
+        cancellation_token: CancellationToken | None,
+    ) -> None:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
 
     # -------------------------------------------------------------------------
     # 构造标准化的运行结果结构体
@@ -738,12 +772,15 @@ class AgentRunner:
         tool_records: list[ToolExecutionRecord],
         session_id: str | None,
         run_id: str,
+        cancellation_token: CancellationToken | None = None,
     ) -> tuple[list[FunctionCallOutput], ToolExecutionRecord | None]:
         """Execute pending tool records and checkpoint every stable result."""
         function_outputs: list[FunctionCallOutput] = []
         ck = self._checkpoint
 
         for record in tool_records:
+            self._raise_if_cancelled(cancellation_token)
+
             # ---- 情况 1：已完成记录，直接复用 ----
             if CheckpointOrchestrator.is_record_complete(record):
                 function_outputs.append(
@@ -855,6 +892,7 @@ class AgentRunner:
                     "tool_calls=%s function_outputs=%s",
                     session_id, step, phase, len(tool_records), len(function_outputs),
                 )
+            self._raise_if_cancelled(cancellation_token)
 
         return function_outputs, None
 
@@ -912,6 +950,7 @@ class AgentRunner:
         session_id: str | None = None,
         resume_checkpoint: Checkpoint | None = None,
         provider_state: ProviderContextState | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> AgentRunResult:
         """Execute one agent turn.
 
@@ -998,6 +1037,19 @@ class AgentRunner:
         # 追踪由 Runner 管理，钩子只需作为轻量观察者，无需实现追踪适配器
         span = self._start_run_span(tracer, agent)
 
+        if cancellation_token is not None and cancellation_token.is_cancelled():
+            if span:
+                span.end_all()
+            return self._finish_cancelled_run(
+                effective_hooks,
+                agent,
+                run_started_at,
+                session_id,
+                last_step,
+                collected_events,
+                cancellation_token.reason,
+            )
+
         # =================================================================
         # 阶段 3：技能快速通道（仅非恢复模式）
         # =================================================================
@@ -1040,6 +1092,7 @@ class AgentRunner:
         try:
             for step in range(start_step, self.max_steps + 1):
                 last_step = step
+                self._raise_if_cancelled(cancellation_token)
                 logger.info(
                     "runner event=step_start agent=%s session_id=%s step=%s "
                     "input_length=%s",
@@ -1083,6 +1136,7 @@ class AgentRunner:
                         tool_records=resume_tool_records,
                         session_id=session_id,
                         run_id=run_id,
+                        cancellation_token=cancellation_token,
                     )
                     resume_tool_records = None
                     if blocked_record is not None:
@@ -1149,6 +1203,7 @@ class AgentRunner:
                         session_id,
                     )
 
+                self._raise_if_cancelled(cancellation_token)
                 llm_input = self._input_for_previous_response(
                     current_input,
                     previous_response_id
@@ -1180,6 +1235,7 @@ class AgentRunner:
                 # ---------------------------------------------------------
                 # 4e. LLM 调用（带超时/重试/熔断/限流弹性防护）
                 # ---------------------------------------------------------
+                self._raise_if_cancelled(cancellation_token)
                 try:
                     response = self._call_llm_with_resilience(
                         agent=agent,
@@ -1261,6 +1317,7 @@ class AgentRunner:
                     if use_openai_previous_response:
                         previous_response_id = response_id
 
+                self._raise_if_cancelled(cancellation_token)
                 # ---------------------------------------------------------
                 # 4g. 解析 LLM 响应：文本答案 vs 工具调用请求
                 # ---------------------------------------------------------
@@ -1348,6 +1405,7 @@ class AgentRunner:
                     tool_records=tool_records,
                     session_id=session_id,
                     run_id=run_id,
+                    cancellation_token=cancellation_token,
                 )
                 if blocked_record is not None:
                     if span:
@@ -1390,6 +1448,24 @@ class AgentRunner:
                 ),
                 run_started_at,
                 session_id,
+            )
+        except RunnerCancelledError as e:
+            if span:
+                span.end_all()
+            logger.info(
+                "runner event=run_cancelled agent=%s session_id=%s step=%s",
+                agent.name,
+                session_id or "",
+                last_step,
+            )
+            return self._finish_cancelled_run(
+                effective_hooks,
+                agent,
+                run_started_at,
+                session_id,
+                last_step,
+                collected_events,
+                e.reason,
             )
         # =================================================================
         # 阶段 5b：未捕获异常 —— 最后防线

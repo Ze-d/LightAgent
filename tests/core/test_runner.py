@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agents.chat_agent import ChatAgent
+from app.core.cancellation import CancellationToken
 from app.core.checkpoint import Checkpoint, CheckpointManager, CheckpointOrchestrator, ToolExecutionRecord
 from app.core.context_builder import ProviderContextState
 from app.core.hooks import BaseRunnerHooks
@@ -233,6 +234,37 @@ def test_runner_keeps_manual_provider_history_without_previous_response_id():
     }]
 
 
+def test_runner_cancellation_token_stops_before_llm_call():
+    calls = []
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+
+    def fake_create(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(output=[], output_text="should not run")
+
+    fake_client.responses.create = fake_create
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+    cancellation_token = CancellationToken()
+    cancellation_token.cancel("user canceled")
+
+    result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "hello"}],
+        cancellation_token=cancellation_token,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "cancelled"
+    assert "user canceled" in result["answer"]
+    assert calls == []
+
+
 def test_runner_chains_current_response_id_for_tool_outputs():
     calls = []
     tool_calls = {"count": 0}
@@ -291,6 +323,71 @@ def test_runner_chains_current_response_id_for_tool_outputs():
             "output": "called-1",
         }
     ]
+
+
+def test_runner_cancellation_token_stops_before_next_tool_call():
+    calls = {"first": 0, "second": 0}
+    cancellation_token = CancellationToken()
+    registry = ToolRegistry()
+
+    def first_tool() -> str:
+        calls["first"] += 1
+        cancellation_token.cancel("stop after first tool")
+        return "first-result"
+
+    def second_tool() -> str:
+        calls["second"] += 1
+        return "second-result"
+
+    registry.register({
+        "name": "first_tool",
+        "description": "First tool.",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": first_tool,
+    })
+    registry.register({
+        "name": "second_tool",
+        "description": "Second tool.",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": second_tool,
+    })
+    first_call = SimpleNamespace(
+        type="function_call",
+        name="first_tool",
+        arguments="{}",
+        call_id="call_1",
+    )
+    second_call = SimpleNamespace(
+        type="function_call",
+        name="second_tool",
+        arguments="{}",
+        call_id="call_2",
+    )
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+    fake_client.responses.create = lambda *args, **kwargs: SimpleNamespace(
+        output=[first_call, second_call],
+        output_text="",
+    )
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+
+    result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "run tools"}],
+        tool_registry=registry,
+        cancellation_token=cancellation_token,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "cancelled"
+    assert calls == {"first": 1, "second": 0}
+    assert len(result["tool_events"]) == 1
+    assert result["tool_events"][0]["tool_name"] == "first_tool"
 
 
 def test_runner_resumes_tool_output_without_repeating_tool(monkeypatch):

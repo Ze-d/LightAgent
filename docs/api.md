@@ -575,7 +575,10 @@ curl -X POST http://localhost:8000/a2a/v1/tasks/task-1:cancel \
 | `404` | `task_not_found` | Task 不存在 |
 | `400` | `task_not_cancelable` | Task 已 completed/failed/rejected |
 
-取消说明：当前 cancel 是 A2A Task 状态层取消，不会强制中断已经进入 `AgentRunner` 的同步线程；晚返回结果不会覆盖 canceled 状态。
+取消说明：cancel 会先把 A2A Task 标记为 canceled，并向运行中的
+`AgentRunner` 发送协作式取消信号。已经阻塞在 LLM/tool 调用中的线程不会
+被强制中断；调用返回后的下一个安全检查点会停止后续 LLM/tool 执行。
+晚返回结果不会覆盖 canceled 状态。
 
 ### POST `/a2a/v1/tasks/{task_id}:subscribe`
 

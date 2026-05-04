@@ -68,7 +68,7 @@ MyAgent 是一个 Python Agent 运行时框架，已实现：
 | 上下文 token 预算 | 已实现 | 按估算 token 裁剪旧历史，避免仅按消息条数截断 |
 | 摘要和记忆升级 | 已实现 | 结构化摘要、摘要合并、session memory 剪枝和独立 memory token 预算 |
 | 工具并行执行 | 待实现 | LLM 一次返回多个 function_call 时减少等待 |
-| Runner 协作式取消 | 待实现 | A2A cancel 可尝试中断运行中的 LLM/tool |
+| Runner 协作式取消 | 已实现 | A2A cancel 会通知运行中的 Runner，在安全检查点停止后续 LLM/tool |
 | Async A2A Client | 待实现 | 支持高并发远端 Agent 调用 |
 | Agent Router/Supervisor | 待实现 | 在多个本地/远端 Agent 间路由任务 |
 

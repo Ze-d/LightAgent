@@ -344,3 +344,35 @@ def test_service_skips_runner_when_return_immediately_task_was_canceled():
 
     assert result.status.state == TaskState.canceled
     assert calls["count"] == 0
+
+
+def test_service_cancel_marks_running_cancellation_token():
+    seen = {"token_cancelled": False}
+    store = InMemoryA2ATaskStore()
+    service = None
+
+    def run_turn(message: Message, context_id: str, cancellation_token=None):
+        assert cancellation_token is not None
+        service.cancel_task(message.task_id)
+        seen["token_cancelled"] = cancellation_token.is_cancelled()
+        return {
+            "answer": "任务已取消。",
+            "success": False,
+            "steps": 1,
+            "tool_events": [],
+            "error": "cancelled",
+        }
+
+    service = A2AService(task_store=store, run_turn=run_turn)
+    task, message = store.prepare_task_for_message(
+        Message(role=A2ARole.user, parts=[Part(text="cancel while running")])
+    )
+
+    result = service._run_task(
+        task_id=task.id,
+        message=message,
+        context_id=task.context_id,
+    )
+
+    assert seen["token_cancelled"] is True
+    assert result.status.state == TaskState.canceled

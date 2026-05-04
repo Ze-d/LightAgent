@@ -97,7 +97,9 @@ TASK_STATE_SUBMITTED
 - completed、failed、canceled、rejected 不会被后续 working/complete/fail 覆盖。
 - 对 completed/failed/rejected 再 cancel 会返回 `400 task_not_cancelable`。
 - 对终态 Task 继续追加 `taskId` 消息会被拒绝。
-- 当前 `AgentRunner` 是同步执行，cancel 是 A2A Task 状态层取消；已经进入 Runner 的线程不会被强制中断，晚返回结果会被 Task Store 忽略。
+- cancel 会先把 A2A Task 标记为 canceled，并向运行中的 `AgentRunner` 发送协作式 cancellation token。
+- 已经阻塞在 LLM 或工具调用中的线程不会被强制杀掉；调用返回后的下一个安全检查点会停止后续 LLM/tool 执行。
+- 晚返回结果会被 Task Store 的终态保护忽略，不会覆盖 canceled 状态。
 
 ## Streaming 事件
 
@@ -202,9 +204,9 @@ register_remote_a2a_agent_tool(
 
 ## 当前限制
 
-- Task Store 和事件 broker 都是进程内内存实现。
+- Task Store 和事件 broker 默认是进程内内存实现，可通过 `STATE_BACKEND=sqlite` 切换到 SQLite 持久化。
 - 暂无 push notification callbacks。
-- 暂无 `AgentRunner` 内部协作式取消。
+- A2A cancel 已接入 `AgentRunner` 协作式取消，但不会强制中断正在阻塞的外部 LLM/tool 调用。
 - 暂无 async A2A Client API。
 - 暂无远端 Agent 自动发现和持久化 remote context 映射。
 - 暂无签名 Agent Card、多租户 Agent Interface 和细粒度 skill auth。

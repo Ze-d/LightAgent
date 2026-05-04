@@ -1,5 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from inspect import Parameter, signature
+from threading import Lock
 from typing import Any
 
 from fastapi import BackgroundTasks
@@ -27,10 +29,11 @@ from app.a2a.task_store import (
     TaskNotFoundError,
     TaskNotCancelableError,
 )
+from app.core.cancellation import CancellationToken, DEFAULT_CANCEL_REASON
 from app.obj.types import AgentRunResult
 
 
-A2ARunTurn = Callable[[Message, str], AgentRunResult]
+A2ARunTurn = Callable[..., AgentRunResult]
 
 
 class A2AServiceError(Exception):
@@ -75,6 +78,8 @@ class A2AService:
         self.run_turn = run_turn
         self.adapter = adapter or A2AProtocolAdapter()
         self.event_broker = event_broker or A2AEventBroker()
+        self._running_tokens: dict[str, CancellationToken] = {}
+        self._running_lock = Lock()
 
     def _prepare_task(
         self,
@@ -134,6 +139,59 @@ class A2AService:
             self._publish_status(task)
         return task
 
+    def _register_running_token(
+        self,
+        task_id: str,
+        token: CancellationToken,
+    ) -> None:
+        with self._running_lock:
+            self._running_tokens[task_id] = token
+
+    def _remove_running_token(self, task_id: str) -> None:
+        with self._running_lock:
+            self._running_tokens.pop(task_id, None)
+
+    def _cancel_running_token(self, task_id: str, reason: str) -> None:
+        with self._running_lock:
+            token = self._running_tokens.get(task_id)
+        if token is not None:
+            token.cancel(reason)
+
+    def _call_run_turn(
+        self,
+        message: Message,
+        context_id: str,
+        cancellation_token: CancellationToken,
+    ) -> AgentRunResult:
+        try:
+            parameters = signature(self.run_turn).parameters
+        except (TypeError, ValueError):
+            return self.run_turn(message, context_id)
+
+        if "cancellation_token" in parameters:
+            return self.run_turn(
+                message,
+                context_id,
+                cancellation_token=cancellation_token,
+            )
+
+        positional_params = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind in {
+                Parameter.POSITIONAL_ONLY,
+                Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        ]
+        accepts_varargs = any(
+            parameter.kind == Parameter.VAR_POSITIONAL
+            for parameter in parameters.values()
+        )
+        if accepts_varargs or len(positional_params) >= 3:
+            return self.run_turn(message, context_id, cancellation_token)
+
+        return self.run_turn(message, context_id)
+
     def _run_task(
         self,
         *,
@@ -151,8 +209,18 @@ class A2AService:
             if task.status.state == TaskState.canceled:
                 return task
 
+        cancellation_token = CancellationToken()
+        self._register_running_token(task_id, cancellation_token)
         try:
-            result = self.run_turn(message, context_id)
+            latest_task = self.task_store.require(task_id)
+            if latest_task.status.state == TaskState.canceled:
+                cancellation_token.cancel(DEFAULT_CANCEL_REASON)
+                return latest_task
+            result = self._call_run_turn(
+                message,
+                context_id,
+                cancellation_token,
+            )
         except Exception as e:
             final_task = self.task_store.fail(
                 task_id,
@@ -162,6 +230,13 @@ class A2AService:
             if final_task.status.state == TaskState.failed:
                 self._publish_status(final_task, final=True)
             return final_task
+        finally:
+            self._remove_running_token(task_id)
+
+        if cancellation_token.is_cancelled():
+            latest_task = self.task_store.require(task_id)
+            if latest_task.status.state == TaskState.canceled:
+                return latest_task
 
         artifact = self._artifact_from_result(result)
         metadata: dict[str, Any] = {
@@ -249,6 +324,7 @@ class A2AService:
                 task_id,
                 metadata=request_metadata,
             )
+            self._cancel_running_token(task_id, DEFAULT_CANCEL_REASON)
             self._publish_status(task, final=True)
             return task
         except TaskNotFoundError as e:

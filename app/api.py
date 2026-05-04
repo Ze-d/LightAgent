@@ -60,6 +60,7 @@ from app.core.checkpoint import (
     CheckpointOrchestrator,
     SQLiteCheckpointManager,
 )
+from app.core.cancellation import CancellationToken
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
@@ -413,6 +414,7 @@ def _run_agent(
     session_id: str,
     hooks: CompositeRunnerHooks | None = None,
     resume_checkpoint: Checkpoint | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> AgentRunResult:
     """Call AgentRunner with the app-level registry."""
     run_result = runner.run(
@@ -423,6 +425,7 @@ def _run_agent(
         hooks=hooks,
         session_id=session_id,
         resume_checkpoint=resume_checkpoint,
+        cancellation_token=cancellation_token,
     )
     _persist_provider_response_id(context_envelope, run_result)
     return run_result
@@ -491,7 +494,11 @@ def _load_or_create_a2a_session(context_id: str) -> tuple[str, list[ChatMessage]
     return session_id, list(history)
 
 
-def _run_a2a_turn(message: A2AMessage, context_id: str) -> AgentRunResult:
+def _run_a2a_turn(
+    message: A2AMessage,
+    context_id: str,
+    cancellation_token: CancellationToken | None = None,
+) -> AgentRunResult:
     user_message = a2a_adapter.extract_text(message)
     session_id, history = _load_or_create_a2a_session(context_id)
     agent = _build_chat_agent()
@@ -502,6 +509,7 @@ def _run_a2a_turn(message: A2AMessage, context_id: str) -> AgentRunResult:
         agent=agent,
         context_envelope=context_envelope,
         session_id=session_id,
+        cancellation_token=cancellation_token,
     )
     _persist_assistant_turn(
         session_id=session_id,

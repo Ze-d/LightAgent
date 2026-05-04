@@ -27,6 +27,7 @@ MyAgent 实现了一套可扩展的 LLM Agent 后端运行时：
 | A2A Server | `/.well-known/agent-card.json`、`/a2a/v1/message:*`、`/a2a/v1/tasks*` |
 | A2A Client | 发现远端 Agent Card、发送消息、消费 SSE、订阅/取消远端 Task |
 | SSE Streaming | `/chat/stream` 与 A2A streaming/subscription 都基于 SSE |
+| Cooperative Cancel | A2A cancel 通过 token 通知 Runner 停止后续 LLM/tool |
 | Hooks/Middleware | 生命周期观察和执行前拦截 |
 | Checkpoint | 工具调用阶段保存快照，支持恢复并避免非幂等工具重复执行 |
 | Memory | 文档型记忆和会话摘要注入 |

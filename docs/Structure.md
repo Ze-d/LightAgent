@@ -36,6 +36,7 @@
 | A2A | `app/a2a/` | A2A schema、server、client、task store、event broker、tool bridge |
 | Agents | `app/agents/` | BaseAgent、ChatAgent、ToolAwareAgent |
 | Runner | `app/core/runner.py` | 协议无关执行循环，多步推理 + 工具调用 |
+| Cancellation | `app/core/cancellation.py` | 长任务协作式取消 token |
 | Tool Registry | `app/core/tool_registry.py` | 本地工具注册与调用 |
 | MCP | `app/mcp/` | MCP 配置、Client、ToolRegistry、stdio/SSE transport |
 | Session | `app/core/session_manager.py` | 会话存储抽象，支持内存/SQLite |
@@ -102,6 +103,7 @@ A2AService
     ├── contextId 映射为内部 session_id
     ├── A2AProtocolAdapter 转为 ChatMessage
     ├── 调用现有 AgentRunner 链路
+    ├── cancel 时向 Runner 发送协作式取消 token
     └── A2AEventBroker 记录/广播 StreamResponse
     │
     ▼
