@@ -11,6 +11,8 @@ from app.configs.config import (
     A2A_EXTENDED_CARD_TOKEN,
     A2A_ICON_URL,
     A2A_PUBLIC_URL,
+    CONTEXT_MAX_INPUT_TOKENS,
+    CONTEXT_MEMORY_MAX_TOKENS,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_MODEL_ID,
@@ -74,11 +76,15 @@ async def lifespan(app: FastAPI):
             "Please copy .env.example to .env and fill in your API key."
         )
     logger.info(
-        "api event=startup model=%s max_steps=%s llm_timeout=%s state_backend=%s",
+        "api event=startup model=%s max_steps=%s llm_timeout=%s "
+        "state_backend=%s context_max_input_tokens=%s "
+        "context_memory_max_tokens=%s",
         LLM_MODEL_ID,
         MAX_STEPS,
         LLM_TIMEOUT,
         _state_backend(),
+        _context_max_input_tokens() or 0,
+        _context_memory_max_tokens() or 0,
     )
 
     mcp_configs = load_mcp_config()
@@ -109,7 +115,14 @@ async def lifespan(app: FastAPI):
 composite_hooks = CompositeRunnerHooks([LoggingHooks()])
 composite_middleware = CompositeRunnerMiddleware([
     InputGuardMiddleware(),
-    HistoryTrimMiddleware(max_messages=20),
+    HistoryTrimMiddleware(
+        max_messages=0,
+        max_input_tokens=(
+            CONTEXT_MAX_INPUT_TOKENS
+            if CONTEXT_MAX_INPUT_TOKENS > 0
+            else None
+        ),
+    ),
     ToolPermissionMiddleware(blocked_tools={"dangerous_tool"}),
 ])
 
@@ -158,6 +171,14 @@ def _build_a2a_event_broker() -> A2AEventBroker:
     return A2AEventBroker()
 
 
+def _context_max_input_tokens() -> int | None:
+    return CONTEXT_MAX_INPUT_TOKENS if CONTEXT_MAX_INPUT_TOKENS > 0 else None
+
+
+def _context_memory_max_tokens() -> int | None:
+    return CONTEXT_MEMORY_MAX_TOKENS if CONTEXT_MEMORY_MAX_TOKENS > 0 else None
+
+
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT)
 session_manager: BaseSessionManager = _build_session_manager()
 context_store: BaseContextStore = _build_context_store()
@@ -171,7 +192,11 @@ runner = AgentRunner(
     checkpoint=checkpoint_orchestrator,
 )
 memory_store = DocumentMemoryStore()
-context_builder = ContextBuilder(memory_store=memory_store)
+context_builder = ContextBuilder(
+    memory_store=memory_store,
+    max_input_tokens=_context_max_input_tokens(),
+    memory_max_tokens=_context_memory_max_tokens(),
+)
 tool_registry = build_default_registry()
 skill_registry = build_default_skills()
 skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composite_hooks)

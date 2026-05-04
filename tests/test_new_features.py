@@ -82,6 +82,45 @@ class TestMemorySummarizer:
         assert result[0]["role"] == "system"
         assert result[0]["content"] == "System prompt"
 
+    def test_summary_contains_structured_context(self):
+        summarizer = MessageSummarizer(target_messages=4)
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Plan SQLite persistence"},
+            {"role": "assistant", "content": "Implemented SQLite state stores"},
+            {"role": "user", "content": "Add token budgeting"},
+            {"role": "assistant", "content": "Added token budget trimmer"},
+            {"role": "user", "content": "Continue"},
+        ]
+
+        result = summarizer.summarize(messages)
+
+        summary = result[1]["content"]
+        assert summary.startswith("[Previous conversation summary]")
+        assert "User topics:" in summary
+        assert "Assistant covered:" in summary
+        assert "SQLite persistence" in summary
+
+    def test_existing_summary_is_merged_not_preserved_as_prompt(self):
+        summarizer = MessageSummarizer(target_messages=4)
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {
+                "role": "system",
+                "content": "[Previous conversation summary]\nOld context",
+            },
+            {"role": "user", "content": "New topic"},
+            {"role": "assistant", "content": "New answer"},
+            {"role": "user", "content": "Latest"},
+        ]
+
+        result = summarizer.summarize(messages)
+
+        assert result[0]["content"] == "System prompt"
+        assert result[1]["content"].startswith("[Previous conversation summary]")
+        assert "Existing summary:" in result[1]["content"]
+        assert result[-1]["content"] == "Latest"
+
 
 class TestHistoryTrimMiddleware:
     def test_summarizes_large_chat_history(self):
@@ -111,6 +150,23 @@ class TestHistoryTrimMiddleware:
 
         assert result["current_input"] == current_input
 
+    def test_trims_chat_history_by_token_budget(self):
+        middleware = HistoryTrimMiddleware(max_messages=0, max_input_tokens=45)
+        current_input = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "old " * 40},
+            {"role": "assistant", "content": "old answer " * 40},
+            {"role": "user", "content": "new question"},
+        ]
+
+        context = {"current_input": current_input}
+        result = middleware.before_llm(context)
+
+        assert result["current_input"] == [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "new question"},
+        ]
+
 
 class TestDocumentMemoryStore:
     def _store(self) -> DocumentMemoryStore:
@@ -131,6 +187,37 @@ class TestDocumentMemoryStore:
 
         assert "[Session Memory]" in context
         assert "User asked about memory." in context
+
+    def test_session_exchange_memory_is_structured(self):
+        store = self._store()
+        session_id = f"test-{uuid4()}"
+
+        store.append_session_exchange(
+            session_id=session_id,
+            user_message="Please remember my deployment preference.",
+            assistant_message="I will keep SQLite as the default local backend.",
+        )
+
+        memory = store.read_session_memory(session_id)
+        assert "User intent:" in memory
+        assert "Assistant response:" in memory
+        assert "SQLite as the default local backend" in memory
+
+    def test_session_memory_prunes_old_entries(self):
+        store = DocumentMemoryStore(
+            Path("test-runtime") / "memory" / str(uuid4()),
+            max_session_entries=2,
+        )
+        session_id = f"test-{uuid4()}"
+
+        store.append_session_summary(session_id, "- first")
+        store.append_session_summary(session_id, "- second")
+        store.append_session_summary(session_id, "- third")
+
+        memory = store.read_session_memory(session_id)
+        assert "first" not in memory
+        assert "second" in memory
+        assert "third" in memory
 
     def test_memory_tools_use_document_store(self, monkeypatch):
         store = self._store()

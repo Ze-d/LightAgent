@@ -118,3 +118,74 @@ def test_preserves_future_context_inputs_as_copies():
         {"type": "function_call_output", "call_id": "1", "output": "ok"}
     ]
     assert envelope.checkpoint_input == [{"role": "user", "content": "checkpoint"}]
+
+
+def test_applies_token_budget_to_context_messages():
+    builder = ContextBuilder(
+        memory_store=FakeMemoryStore(),
+        max_input_tokens=45,
+    )
+    history = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "old " * 40},
+        {"role": "assistant", "content": "old answer " * 40},
+        {"role": "user", "content": "new question"},
+    ]
+
+    envelope = builder.build(context_state=_state(), history=history)
+
+    assert envelope.messages == [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "new question"},
+    ]
+    assert envelope.clean_history == history
+    assert envelope.budget.status == "estimated"
+    assert envelope.budget.reason == "trimmed_history"
+    assert envelope.budget.dropped_messages == 2
+    assert envelope.budget.max_input_tokens == 45
+
+
+def test_token_budget_can_drop_transient_memory_context():
+    builder = ContextBuilder(
+        memory_store=FakeMemoryStore("remember " * 60),
+        max_input_tokens=35,
+    )
+    history = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "new question"},
+    ]
+
+    envelope = builder.build(context_state=_state(), history=history)
+
+    assert envelope.memory_context
+    assert envelope.memory_injected is False
+    assert envelope.messages == history
+    assert envelope.budget.reason == "trimmed_history_and_optional_system"
+
+
+def test_memory_context_has_own_budget_before_injection():
+    memory_context = (
+        "[Project Memory]\n" + "stable convention " * 50
+        + "\n\n[Session Memory]\n"
+        + "old detail " * 80
+        + "latest decision"
+    )
+    builder = ContextBuilder(
+        memory_store=FakeMemoryStore(memory_context),
+        memory_max_tokens=60,
+        max_input_tokens=200,
+    )
+    history = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "new question"},
+    ]
+
+    envelope = builder.build(context_state=_state(), history=history)
+
+    assert envelope.memory_truncated is True
+    assert envelope.memory_context_tokens <= 60
+    assert envelope.memory_max_tokens == 60
+    assert "[Project Memory]" in envelope.memory_context
+    assert "[Session Memory]" in envelope.memory_context
+    assert "latest decision" in envelope.memory_context
+    assert envelope.memory_injected is True

@@ -70,6 +70,10 @@ Accept: text/event-stream
 ### POST `/chat`
 
 执行一次普通同步对话。
+服务会在注入 memory context 后按 `CONTEXT_MAX_INPUT_TOKENS` 估算 token
+预算裁剪旧历史，优先保留 system prompt 和最近用户输入。
+memory context 在注入前会先按 `CONTEXT_MEMORY_MAX_TOKENS` 独立压缩；
+会话摘要使用结构化格式记录用户主题、助手处理内容和已有摘要。
 
 **请求示例：新会话**
 

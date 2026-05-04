@@ -12,6 +12,10 @@ LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))
 
 
+CONTEXT_MAX_INPUT_TOKENS = int(os.getenv("CONTEXT_MAX_INPUT_TOKENS", "8000"))
+CONTEXT_MEMORY_MAX_TOKENS = int(os.getenv("CONTEXT_MEMORY_MAX_TOKENS", "1200"))
+
+
 STATE_BACKEND = os.getenv("STATE_BACKEND", "memory").strip().lower()
 STATE_DB_PATH = os.getenv("STATE_DB_PATH", ".runtime/myagent.sqlite3")
 

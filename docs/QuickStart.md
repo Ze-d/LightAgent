@@ -28,6 +28,10 @@ LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_TIMEOUT=30
 MAX_STEPS=5
 
+# Estimated input context token budget. Set to 0 to disable.
+CONTEXT_MAX_INPUT_TOKENS=8000
+CONTEXT_MEMORY_MAX_TOKENS=1200
+
 # State backend: memory or sqlite
 STATE_BACKEND=memory
 STATE_DB_PATH=.runtime/myagent.sqlite3

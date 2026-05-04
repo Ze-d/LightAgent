@@ -39,7 +39,7 @@
 | Tool Registry | `app/core/tool_registry.py` | 本地工具注册与调用 |
 | MCP | `app/mcp/` | MCP 配置、Client、ToolRegistry、stdio/SSE transport |
 | Session | `app/core/session_manager.py` | 会话存储抽象，支持内存/SQLite |
-| Context State | `app/core/context_state.py`, `app/core/context_builder.py` | 应用会话、Provider 上下文和 LLM 输入 envelope |
+| Context State | `app/core/context_state.py`, `app/core/context_builder.py`, `app/core/token_budget.py` | 应用会话、Provider 上下文、token 预算和 LLM 输入 envelope |
 | Checkpoint | `app/core/checkpoint.py` | 执行快照与恢复 |
 | Event/SSE | `app/core/event_channel.py`, `app/core/sse.py` | SSE 事件通道与兼容响应 |
 | Hooks | `app/core/hooks.py`, `app/hooks/` | 生命周期观察者 |
@@ -66,6 +66,9 @@ SessionManager 创建/加载 history
     │
     ▼
 注入只读 memory context
+    │
+    ▼
+按 token 预算裁剪旧历史
     │
     ▼
 ToolAwareAgent + AgentRunner.run()
@@ -159,6 +162,8 @@ A2AClient
 | `LLM_BASE_URL` | DashScope compatible URL | OpenAI-compatible API 地址 |
 | `LLM_TIMEOUT` | `30` | LLM 调用超时秒数 |
 | `MAX_STEPS` | `5` | Agent 最大执行步数 |
+| `CONTEXT_MAX_INPUT_TOKENS` | `8000` | 估算输入上下文 token 预算；设为 `0` 可关闭 |
+| `CONTEXT_MEMORY_MAX_TOKENS` | `1200` | memory 注入前的独立 token 预算；设为 `0` 可关闭 |
 | `STATE_BACKEND` | `memory` | 状态后端，支持 `memory` 或 `sqlite` |
 | `STATE_DB_PATH` | `.runtime/myagent.sqlite3` | SQLite 状态库路径 |
 | `A2A_PUBLIC_URL` | 空 | Agent Card 对外 URL；为空时用请求 base URL |
@@ -212,6 +217,10 @@ A2AClient
 默认部署形态仍是单 Python 进程和内存状态。设置 `STATE_BACKEND=sqlite`
 后，Chat session、context state、checkpoint、A2A task 和 A2A event replay
 log 会写入 `STATE_DB_PATH`，服务重启后可恢复最近状态。实时 SSE fan-out 仍是进程内行为。
+
+上下文构建会先按 `CONTEXT_MEMORY_MAX_TOKENS` 压缩 memory context，再按
+`CONTEXT_MAX_INPUT_TOKENS` 裁剪最终 LLM 输入。历史摘要使用结构化 system
+summary，避免把旧摘要当普通系统提示重复保留。
 
 ---
 

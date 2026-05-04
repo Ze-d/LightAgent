@@ -6,14 +6,23 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from app.memory.summarizer import MessageSummarizer
+
 
 class DocumentMemoryStore:
-    def __init__(self, base_dir: str | Path = ".memory") -> None:
+    def __init__(
+        self,
+        base_dir: str | Path = ".memory",
+        *,
+        max_session_entries: int = 100,
+    ) -> None:
         self.base_dir = Path(base_dir)
         self.project_file = self.base_dir / "project.md"
         self.user_file = self.base_dir / "user.md"
         self.sessions_dir = self.base_dir / "sessions"
         self.tasks_dir = self.base_dir / "tasks"
+        self.max_session_entries = max_session_entries
+        self.summarizer = MessageSummarizer()
         self._lock = threading.Lock()
         self.ensure_layout()
 
@@ -47,7 +56,9 @@ class DocumentMemoryStore:
 
         timestamp = datetime.now().isoformat(timespec="seconds")
         entry = f"\n## {timestamp}\n\n{summary}\n"
-        self._append(self._session_file(session_id), entry)
+        session_file = self._session_file(session_id)
+        self._append(session_file, entry)
+        self._prune_session_file(session_file)
 
     def append_session_exchange(
         self,
@@ -55,11 +66,9 @@ class DocumentMemoryStore:
         user_message: str,
         assistant_message: str,
     ) -> None:
-        user_message = self._truncate(user_message)
-        assistant_message = self._truncate(assistant_message)
-        summary = (
-            "- User: " + user_message + "\n"
-            "- Assistant: " + assistant_message
+        summary = self.summarizer.summarize_exchange(
+            user_message=user_message,
+            assistant_message=assistant_message,
         )
         self.append_session_summary(session_id, summary)
 
@@ -107,6 +116,33 @@ class DocumentMemoryStore:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as file:
                 file.write(content)
+
+    def _prune_session_file(self, path: Path) -> None:
+        if self.max_session_entries <= 0 or not path.exists():
+            return
+
+        with self._lock:
+            content = path.read_text(encoding="utf-8")
+            entries = self._split_session_entries(content)
+            if len(entries) <= self.max_session_entries:
+                return
+            retained = entries[-self.max_session_entries:]
+            path.write_text("\n".join(retained).strip() + "\n", encoding="utf-8")
+
+    def _split_session_entries(self, content: str) -> list[str]:
+        entries: list[str] = []
+        current: list[str] = []
+        for line in content.splitlines():
+            if line.startswith("## ") and current:
+                entries.append("\n".join(current).strip())
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            entry = "\n".join(current).strip()
+            if entry:
+                entries.append(entry)
+        return entries
 
     def _is_comment_only(self, content: str) -> bool:
         return content.startswith("<!--") and content.endswith("-->")

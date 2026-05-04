@@ -51,6 +51,9 @@ LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_TIMEOUT=30
 MAX_STEPS=5
 
+CONTEXT_MAX_INPUT_TOKENS=8000
+CONTEXT_MEMORY_MAX_TOKENS=1200
+
 STATE_BACKEND=memory
 STATE_DB_PATH=.runtime/myagent.sqlite3
 
