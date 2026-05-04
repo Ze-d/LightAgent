@@ -12,6 +12,10 @@ LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))
 
 
+STATE_BACKEND = os.getenv("STATE_BACKEND", "memory").strip().lower()
+STATE_DB_PATH = os.getenv("STATE_DB_PATH", ".runtime/myagent.sqlite3")
+
+
 A2A_PUBLIC_URL = os.getenv("A2A_PUBLIC_URL", "").strip()
 A2A_AGENT_VERSION = os.getenv("A2A_AGENT_VERSION", "0.1.0")
 A2A_DOCUMENTATION_URL = os.getenv("A2A_DOCUMENTATION_URL")

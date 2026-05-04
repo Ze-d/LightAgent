@@ -3,6 +3,7 @@ import pytest
 from app.a2a.schemas import A2ARole, Message, Part, TaskState
 from app.a2a.task_store import (
     InMemoryA2ATaskStore,
+    SQLiteA2ATaskStore,
     TaskNotCancelableError,
     TaskNotFoundError,
 )
@@ -88,3 +89,24 @@ def test_task_store_rejects_cancel_for_completed_task():
 
     with pytest.raises(TaskNotCancelableError):
         store.cancel(task.id)
+
+
+def test_sqlite_task_store_persists_tasks_and_supports_filters(sqlite_db_path):
+    store = SQLiteA2ATaskStore(sqlite_db_path)
+    task, _ = store.prepare_task_for_message(
+        Message(
+            role=A2ARole.user,
+            parts=[Part(text="hello")],
+            contextId="ctx-1",
+        )
+    )
+    store.complete(task.id, answer="done")
+
+    reloaded = SQLiteA2ATaskStore(sqlite_db_path)
+    loaded = reloaded.require(task.id)
+    listed = reloaded.list(context_id="ctx-1", state=TaskState.completed)
+
+    assert loaded.status.state == TaskState.completed
+    assert loaded.history[-1].parts[0].text == "done"
+    assert listed.total_size == 1
+    assert listed.tasks[0].id == task.id

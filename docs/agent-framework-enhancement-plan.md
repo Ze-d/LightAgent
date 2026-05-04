@@ -54,12 +54,12 @@ MyAgent 是一个 Python Agent 运行时框架，已实现：
 
 ### P0 - 持久化与多实例基础
 
-| 功能 | 价值 |
-|------|------|
-| Redis/SQLite SessionManager | 支持服务重启后恢复 session |
-| 持久化 A2A Task Store | 支持 A2A Task 查询与订阅跨进程 |
-| 持久化 Event Log | 支持 A2A 事件 replay |
-| 配置化远端 A2A Agent Registry | 启动时自动注册远端 Agent 工具 |
+| 功能 | 状态 | 价值 |
+|------|------|------|
+| SQLite Session/Context/Checkpoint | 已实现 | 支持服务重启后恢复 chat session、provider context 和 checkpoint |
+| 持久化 A2A Task Store | 已实现 | 支持 A2A Task 查询跨进程/重启 |
+| 持久化 Event Log | 已实现 | 支持 A2A 事件 replay |
+| 配置化远端 A2A Agent Registry | 待实现 | 启动时自动注册远端 Agent 工具 |
 
 ### P1 - 执行效率与协作能力
 

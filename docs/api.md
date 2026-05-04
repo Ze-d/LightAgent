@@ -671,18 +671,21 @@ Authorization: Bearer <A2A_EXTENDED_CARD_TOKEN>
 
 ---
 
-## 8. 状态存储限制
+## 8. 状态存储
 
-默认实现都是进程内内存：
+默认实现仍是进程内内存；设置 `STATE_BACKEND=sqlite` 后会使用
+`STATE_DB_PATH` 指定的 SQLite 文件：
 
-| 状态 | 实现 |
-|------|------|
-| Chat session | `InMemorySessionManager` |
-| Checkpoint | `CheckpointManager` |
-| A2A Task | `InMemoryA2ATaskStore` |
-| A2A Event | `A2AEventBroker` |
+| 状态 | 默认实现 | SQLite 实现 |
+|------|----------|-------------|
+| Chat session | `InMemorySessionManager` | `SQLiteSessionManager` |
+| Context state | `InMemoryContextStore` | `SQLiteContextStore` |
+| Checkpoint | `CheckpointManager` | `SQLiteCheckpointManager` |
+| A2A Task | `InMemoryA2ATaskStore` | `SQLiteA2ATaskStore` |
+| A2A Event replay log | `A2AEventBroker` | `SQLiteA2AEventBroker` |
 
-服务重启后这些状态会丢失；多实例部署时也不会自动共享。
+SQLite 模式可支持服务重启后恢复 session、provider context、checkpoint
+和 A2A task 查询；实时 SSE 订阅 fan-out 仍是进程内行为。
 
 ---
 

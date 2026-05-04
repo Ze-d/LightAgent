@@ -1,4 +1,9 @@
-from app.core.checkpoint import CheckpointManager, Checkpoint, ToolExecutionRecord
+from app.core.checkpoint import (
+    CheckpointManager,
+    SQLiteCheckpointManager,
+    Checkpoint,
+    ToolExecutionRecord,
+)
 
 
 def test_save_and_load_checkpoint():
@@ -150,3 +155,50 @@ def test_save_records_checkpoint_phase_and_tool_outputs():
     checkpoint.tool_calls[0].output = "modified"
     checkpoint2 = manager.load(session_id)
     assert checkpoint2.tool_calls[0].output == "5"
+
+
+def test_sqlite_checkpoint_manager_persists_latest_checkpoint(sqlite_db_path):
+    manager = SQLiteCheckpointManager(sqlite_db_path)
+    session_id = "session-sqlite"
+    tool_record = ToolExecutionRecord(
+        call_id="call_1",
+        tool_name="lookup",
+        arguments={"q": "x"},
+        arguments_hash="hash",
+        status="succeeded",
+        output="result",
+    )
+    output = {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "result",
+    }
+
+    manager.save(
+        session_id,
+        step=1,
+        history=[{"role": "user", "content": "hi"}],
+        agent_state={"tool_event_history": []},
+        phase="tool_requested",
+        tool_calls=[tool_record],
+        run_id="run-1",
+    )
+    manager.save(
+        session_id,
+        step=2,
+        history=[output],
+        agent_state={"tool_event_history": [{"name": "lookup"}]},
+        phase="tool_output_ready",
+        function_outputs=[output],
+        run_id="run-1",
+    )
+
+    reloaded = SQLiteCheckpointManager(sqlite_db_path)
+    checkpoint = reloaded.load(session_id)
+
+    assert checkpoint is not None
+    assert checkpoint.step == 2
+    assert checkpoint.phase == "tool_output_ready"
+    assert checkpoint.run_id == "run-1"
+    assert checkpoint.function_outputs == [output]
+    assert reloaded.has_checkpoint(session_id) is True

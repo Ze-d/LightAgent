@@ -1,4 +1,4 @@
-from app.core.session_manager import InMemorySessionManager
+from app.core.session_manager import InMemorySessionManager, SQLiteSessionManager
 
 
 def test_create_and_load_session():
@@ -58,3 +58,20 @@ def test_load_returns_copy():
     history2 = manager.load(session_id)
     assert history2 is not None
     assert len(history2) == 1
+
+
+def test_sqlite_session_manager_persists_sessions_across_instances(sqlite_db_path):
+    manager = SQLiteSessionManager(sqlite_db_path)
+
+    session_id = manager.create([
+        {"role": "system", "content": "You are a test agent."}
+    ])
+    manager.append(session_id, {"role": "user", "content": "你好"})
+
+    reloaded = SQLiteSessionManager(sqlite_db_path)
+    history = reloaded.load(session_id)
+
+    assert history == [
+        {"role": "system", "content": "You are a test agent."},
+        {"role": "user", "content": "你好"},
+    ]

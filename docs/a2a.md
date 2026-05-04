@@ -76,7 +76,7 @@ curl -N -X POST http://localhost:8000/a2a/v1/message:stream \
 | A2A 概念 | MyAgent 内部概念 |
 |------|------|
 | `contextId` | `session_id` |
-| `taskId` | `InMemoryA2ATaskStore` 中的 Task ID |
+| `taskId` | `A2ATaskStore` 中的 Task ID（默认内存，可配置 SQLite） |
 | text `Message` | `ChatMessage` |
 | `Task` artifact | `AgentRunResult.answer` |
 | `TASK_STATE_COMPLETED` | `AgentRunResult.success == true` |
@@ -102,6 +102,8 @@ TASK_STATE_SUBMITTED
 ## Streaming 事件
 
 `message:stream` 和 `tasks/{id}:subscribe` 共用 `A2AEventBroker`。
+设置 `STATE_BACKEND=sqlite` 后，事件 replay log 会写入 SQLite；
+实时订阅 fan-out 仍在当前进程内完成。
 
 普通完成事件顺序：
 

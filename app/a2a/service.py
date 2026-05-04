@@ -22,6 +22,7 @@ from app.a2a.schemas import (
 )
 from app.a2a.task_store import (
     InMemoryA2ATaskStore,
+    SQLiteA2ATaskStore,
     TaskConflictError,
     TaskNotFoundError,
     TaskNotCancelableError,
@@ -65,7 +66,7 @@ class A2AService:
     def __init__(
         self,
         *,
-        task_store: InMemoryA2ATaskStore,
+        task_store: InMemoryA2ATaskStore | SQLiteA2ATaskStore,
         run_turn: A2ARunTurn,
         adapter: A2AProtocolAdapter | None = None,
         event_broker: A2AEventBroker | None = None,

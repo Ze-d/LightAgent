@@ -16,12 +16,15 @@ from app.configs.config import (
     LLM_MODEL_ID,
     LLM_TIMEOUT,
     MAX_STEPS,
+    STATE_BACKEND,
+    STATE_DB_PATH,
 )
 from app.a2a import build_a2a_router, build_agent_card, build_extended_agent_card
 from app.a2a.adapter import A2AProtocolAdapter
+from app.a2a.event_broker import A2AEventBroker, SQLiteA2AEventBroker
 from app.a2a.schemas import Message as A2AMessage
 from app.a2a.service import A2AService
-from app.a2a.task_store import InMemoryA2ATaskStore
+from app.a2a.task_store import InMemoryA2ATaskStore, SQLiteA2ATaskStore
 from app.core.sse import EventSourceResponse
 from app.core.hooks import CompositeRunnerHooks
 from app.core.middleware import CompositeRunnerMiddleware
@@ -35,16 +38,26 @@ from app.configs.logger import logger
 from app.obj.schemas import ChatRequest, ChatResponse
 from app.obj.types import AgentRunResult, ChatMessage
 from app.core.runner import AgentRunner
-from app.core.session_manager import BaseSessionManager, InMemorySessionManager
+from app.core.session_manager import (
+    BaseSessionManager,
+    InMemorySessionManager,
+    SQLiteSessionManager,
+)
 from app.core.context_state import (
     BaseContextStore,
     ContextChannel,
     InMemoryContextStore,
     ProviderMode,
+    SQLiteContextStore,
 )
 from app.core.context_builder import ContextBuilder, ContextEnvelope
 from app.core.event_channel import EventChannel
-from app.core.checkpoint import Checkpoint, CheckpointManager, CheckpointOrchestrator
+from app.core.checkpoint import (
+    Checkpoint,
+    CheckpointManager,
+    CheckpointOrchestrator,
+    SQLiteCheckpointManager,
+)
 from app.tools.register import build_default_registry
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
@@ -61,10 +74,11 @@ async def lifespan(app: FastAPI):
             "Please copy .env.example to .env and fill in your API key."
         )
     logger.info(
-        "api event=startup model=%s max_steps=%s llm_timeout=%s",
+        "api event=startup model=%s max_steps=%s llm_timeout=%s state_backend=%s",
         LLM_MODEL_ID,
         MAX_STEPS,
         LLM_TIMEOUT,
+        _state_backend(),
     )
 
     mcp_configs = load_mcp_config()
@@ -100,10 +114,54 @@ composite_middleware = CompositeRunnerMiddleware([
 ])
 
 app = FastAPI(title="Minimal Agent API", lifespan=lifespan)
+
+
+def _state_backend() -> str:
+    backend = STATE_BACKEND.strip().lower()
+    if backend in {"memory", "inmemory", "in_memory"}:
+        return "memory"
+    if backend == "sqlite":
+        return "sqlite"
+    raise RuntimeError(
+        "STATE_BACKEND must be 'memory' or 'sqlite', "
+        f"got: {STATE_BACKEND!r}"
+    )
+
+
+def _build_session_manager() -> BaseSessionManager:
+    if _state_backend() == "sqlite":
+        return SQLiteSessionManager(STATE_DB_PATH)
+    return InMemorySessionManager()
+
+
+def _build_context_store() -> BaseContextStore:
+    if _state_backend() == "sqlite":
+        return SQLiteContextStore(STATE_DB_PATH)
+    return InMemoryContextStore()
+
+
+def _build_checkpoint_manager() -> CheckpointManager | SQLiteCheckpointManager:
+    if _state_backend() == "sqlite":
+        return SQLiteCheckpointManager(STATE_DB_PATH)
+    return CheckpointManager()
+
+
+def _build_a2a_task_store() -> InMemoryA2ATaskStore | SQLiteA2ATaskStore:
+    if _state_backend() == "sqlite":
+        return SQLiteA2ATaskStore(STATE_DB_PATH)
+    return InMemoryA2ATaskStore()
+
+
+def _build_a2a_event_broker() -> A2AEventBroker:
+    if _state_backend() == "sqlite":
+        return SQLiteA2AEventBroker(STATE_DB_PATH)
+    return A2AEventBroker()
+
+
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT)
-session_manager: BaseSessionManager = InMemorySessionManager()
-context_store: BaseContextStore = InMemoryContextStore()
-checkpoint_manager = CheckpointManager()
+session_manager: BaseSessionManager = _build_session_manager()
+context_store: BaseContextStore = _build_context_store()
+checkpoint_manager = _build_checkpoint_manager()
 checkpoint_orchestrator = CheckpointOrchestrator(checkpoint_manager)
 runner = AgentRunner(
     client=client,
@@ -120,7 +178,8 @@ skill_dispatcher = SkillDispatcher(skill_registry=skill_registry, hooks=composit
 runner.skill_dispatcher = skill_dispatcher
 mcp_registry = MCPToolRegistry(tool_registry)
 a2a_adapter = A2AProtocolAdapter()
-a2a_task_store = InMemoryA2ATaskStore()
+a2a_task_store = _build_a2a_task_store()
+a2a_event_broker = _build_a2a_event_broker()
 
 
 def _resolve_a2a_public_url(request_base_url: str) -> str:
@@ -432,6 +491,7 @@ a2a_service = A2AService(
     task_store=a2a_task_store,
     adapter=a2a_adapter,
     run_turn=_run_a2a_turn,
+    event_broker=a2a_event_broker,
 )
 app.include_router(
     build_a2a_router(
@@ -569,7 +629,7 @@ async def chat_stream(req: ChatRequest):
 @app.post("/checkpoint/{session_id}/resume", response_model=ChatResponse)
 def resume_checkpoint(session_id: str) -> ChatResponse:
     internal_session_id = _resolve_context_session_id(session_id)
-    checkpoint = checkpoint_manager.load(internal_session_id)
+    checkpoint = checkpoint_orchestrator.load(internal_session_id)
     if checkpoint is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -617,7 +677,7 @@ def resume_checkpoint(session_id: str) -> ChatResponse:
 @app.get("/checkpoint/{session_id}")
 def get_checkpoint(session_id: str):
     internal_session_id = _resolve_context_session_id(session_id)
-    checkpoint = checkpoint_manager.load(internal_session_id)
+    checkpoint = checkpoint_orchestrator.load(internal_session_id)
     if checkpoint is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -653,5 +713,5 @@ def get_checkpoint(session_id: str):
 @app.delete("/checkpoint/{session_id}")
 def delete_checkpoint(session_id: str):
     internal_session_id = _resolve_context_session_id(session_id)
-    checkpoint_manager.clear(internal_session_id)
+    checkpoint_orchestrator.clear(internal_session_id)
     return {"message": f"Checkpoint cleared for session: {internal_session_id}"}

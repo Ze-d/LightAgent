@@ -414,7 +414,7 @@ class SQLiteA2ATaskStore:
                 params.append(context_id)
             if state is not None:
                 filters.append("state = ?")
-                params.append(str(state))
+                params.append(state.value if isinstance(state, TaskState) else state)
             if filters:
                 sql += " WHERE " + " AND ".join(filters)
             sql += " ORDER BY rowid"

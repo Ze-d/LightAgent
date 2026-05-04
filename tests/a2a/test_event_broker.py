@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.a2a.event_broker import A2AEventBroker
+from app.a2a.event_broker import A2AEventBroker, SQLiteA2AEventBroker
 from app.a2a.schemas import (
     StreamResponse,
     TaskState,
@@ -67,5 +67,32 @@ def test_event_broker_replays_logged_events():
 
         assert event.status_update.status.state == TaskState.working
         subscription.close()
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_event_broker_replays_events_across_instances(sqlite_db_path):
+    async def scenario():
+        broker = SQLiteA2AEventBroker(sqlite_db_path)
+        broker.publish("task-1", _status_event(state=TaskState.working))
+        broker.publish(
+            "task-1",
+            _status_event(state=TaskState.completed, final=True),
+        )
+
+        reloaded = SQLiteA2AEventBroker(sqlite_db_path)
+        events = reloaded.events("task-1")
+        subscription = reloaded.subscribe("task-1", replay=True)
+        replayed_working = await subscription.__anext__()
+        replayed_final = await subscription.__anext__()
+
+        assert [event.status_update.status.state for event in events] == [
+            TaskState.working,
+            TaskState.completed,
+        ]
+        assert replayed_working.status_update.status.state == TaskState.working
+        assert replayed_final.status_update.status.state == TaskState.completed
+        with pytest.raises(StopAsyncIteration):
+            await subscription.__anext__()
 
     asyncio.run(scenario())

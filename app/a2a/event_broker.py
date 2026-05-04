@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 
 from app.a2a.schemas import StreamResponse, TERMINAL_TASK_STATES
+from app.core.sqlite_state import SQLiteStateBackend, dumps_json, loads_json
 
 
 @dataclass(frozen=True)
@@ -122,3 +124,76 @@ class A2AEventBroker:
         if response.status_update is None:
             return False
         return response.status_update.status.state in TERMINAL_TASK_STATES
+
+
+class SQLiteA2AEventBroker(A2AEventBroker):
+    """SQLite-backed A2A event log with in-process live fan-out."""
+
+    def __init__(self, db_path: str | Path) -> None:
+        super().__init__()
+        self._backend = SQLiteStateBackend(db_path)
+
+    def events(self, task_id: str) -> list[StreamResponse]:
+        with self._lock:
+            return self._load_events(task_id)
+
+    def subscribe(
+        self,
+        task_id: str,
+        *,
+        replay: bool = False,
+    ) -> A2AEventSubscription:
+        loop = asyncio.get_running_loop()
+        subscriber = _Subscriber(loop=loop, queue=asyncio.Queue())
+        with self._lock:
+            self._subscribers.setdefault(task_id, []).append(subscriber)
+            replay_events = self._load_events(task_id) if replay else []
+
+        for event in replay_events:
+            subscriber.queue.put_nowait(event)
+        if replay_events and self._is_terminal_event(replay_events[-1]):
+            subscriber.queue.put_nowait(None)
+
+        return A2AEventSubscription(self, task_id, subscriber)
+
+    def publish(self, task_id: str, response: StreamResponse) -> None:
+        event = response.model_copy(deep=True)
+        with self._lock:
+            self._store_event(task_id, event)
+            subscribers = list(self._subscribers.get(task_id, []))
+            terminal = self._is_terminal_event(event)
+            if terminal:
+                self._subscribers.pop(task_id, None)
+
+        for subscriber in subscribers:
+            self._publish_to_subscriber(subscriber, event)
+            if terminal:
+                self._close_subscriber(subscriber)
+
+    def _load_events(self, task_id: str) -> list[StreamResponse]:
+        with self._backend.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_json FROM a2a_events
+                WHERE task_id = ?
+                ORDER BY id
+                """,
+                (task_id,),
+            ).fetchall()
+        return [
+            StreamResponse.model_validate(
+                loads_json(row["event_json"], default={})
+            )
+            for row in rows
+        ]
+
+    def _store_event(self, task_id: str, event: StreamResponse) -> None:
+        payload = event.model_dump(by_alias=True, exclude_none=True)
+        with self._backend.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO a2a_events (task_id, event_json, created_at)
+                VALUES (?, ?, datetime('now'))
+                """,
+                (task_id, dumps_json(payload)),
+            )

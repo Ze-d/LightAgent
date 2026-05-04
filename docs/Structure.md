@@ -38,7 +38,8 @@
 | Runner | `app/core/runner.py` | 协议无关执行循环，多步推理 + 工具调用 |
 | Tool Registry | `app/core/tool_registry.py` | 本地工具注册与调用 |
 | MCP | `app/mcp/` | MCP 配置、Client、ToolRegistry、stdio/SSE transport |
-| Session | `app/core/session_manager.py` | 会话存储抽象，默认内存实现 |
+| Session | `app/core/session_manager.py` | 会话存储抽象，支持内存/SQLite |
+| Context State | `app/core/context_state.py`, `app/core/context_builder.py` | 应用会话、Provider 上下文和 LLM 输入 envelope |
 | Checkpoint | `app/core/checkpoint.py` | 执行快照与恢复 |
 | Event/SSE | `app/core/event_channel.py`, `app/core/sse.py` | SSE 事件通道与兼容响应 |
 | Hooks | `app/core/hooks.py`, `app/hooks/` | 生命周期观察者 |
@@ -94,7 +95,7 @@ A2A Message
     ▼
 A2AService
     │
-    ├── InMemoryA2ATaskStore 创建 Task
+    ├── A2ATaskStore 创建 Task（默认内存，可配置 SQLite）
     ├── contextId 映射为内部 session_id
     ├── A2AProtocolAdapter 转为 ChatMessage
     ├── 调用现有 AgentRunner 链路
@@ -158,6 +159,8 @@ A2AClient
 | `LLM_BASE_URL` | DashScope compatible URL | OpenAI-compatible API 地址 |
 | `LLM_TIMEOUT` | `30` | LLM 调用超时秒数 |
 | `MAX_STEPS` | `5` | Agent 最大执行步数 |
+| `STATE_BACKEND` | `memory` | 状态后端，支持 `memory` 或 `sqlite` |
+| `STATE_DB_PATH` | `.runtime/myagent.sqlite3` | SQLite 状态库路径 |
 | `A2A_PUBLIC_URL` | 空 | Agent Card 对外 URL；为空时用请求 base URL |
 | `A2A_AGENT_VERSION` | `0.1.0` | Agent Card 版本 |
 | `A2A_EXTENDED_CARD_TOKEN` | 空 | 扩展 Agent Card bearer token |
@@ -206,7 +209,9 @@ A2AClient
            └── Remote A2A Agent
 ```
 
-当前部署形态仍是单 Python 进程。Session、A2A Task Store 和 Event Broker 默认都是内存实现。
+默认部署形态仍是单 Python 进程和内存状态。设置 `STATE_BACKEND=sqlite`
+后，Chat session、context state、checkpoint、A2A task 和 A2A event replay
+log 会写入 `STATE_DB_PATH`，服务重启后可恢复最近状态。实时 SSE fan-out 仍是进程内行为。
 
 ---
 

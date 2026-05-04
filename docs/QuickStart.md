@@ -28,6 +28,10 @@ LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_TIMEOUT=30
 MAX_STEPS=5
 
+# State backend: memory or sqlite
+STATE_BACKEND=memory
+STATE_DB_PATH=.runtime/myagent.sqlite3
+
 # A2A discovery
 A2A_PUBLIC_URL=http://localhost:8000
 A2A_AGENT_VERSION=0.1.0

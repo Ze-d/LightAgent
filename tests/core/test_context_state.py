@@ -3,6 +3,7 @@ import pytest
 from app.core.context_state import (
     ContextStateNotFoundError,
     InMemoryContextStore,
+    SQLiteContextStore,
 )
 
 
@@ -92,3 +93,35 @@ def test_require_raises_for_missing_state():
 
     with pytest.raises(ContextStateNotFoundError):
         store.require("missing")
+
+
+def test_sqlite_context_store_persists_provider_state_across_instances(
+    sqlite_db_path,
+):
+    store = SQLiteContextStore(sqlite_db_path)
+    state = store.get_or_create_for_external_context(
+        channel="a2a",
+        external_context_id="ctx-1",
+        provider="openai",
+        provider_mode="openai_previous_response",
+        metadata={"source": "test"},
+    )
+    store.bump_history_version(state.session_id)
+    store.update_provider_state(
+        state.session_id,
+        last_response_id="resp_123",
+    )
+
+    reloaded = SQLiteContextStore(sqlite_db_path)
+    loaded = reloaded.get_by_external_context(
+        channel="a2a",
+        external_context_id="ctx-1",
+    )
+
+    assert loaded is not None
+    assert loaded.session_id == "a2a:ctx-1"
+    assert loaded.provider == "openai"
+    assert loaded.provider_mode == "openai_previous_response"
+    assert loaded.last_response_id == "resp_123"
+    assert loaded.history_version == 1
+    assert loaded.metadata == {"source": "test"}
