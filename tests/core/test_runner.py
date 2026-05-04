@@ -4,6 +4,7 @@ import pytest
 
 from app.agents.chat_agent import ChatAgent
 from app.core.checkpoint import Checkpoint, CheckpointManager, CheckpointOrchestrator, ToolExecutionRecord
+from app.core.context_builder import ProviderContextState
 from app.core.hooks import BaseRunnerHooks
 from app.core.runner import AgentRunner
 from app.core.tool_registry import ToolRegistry
@@ -145,6 +146,151 @@ def test_runner_clears_checkpoint_when_llm_returns_no_tool_calls():
     assert result["answer"] == "final without tools"
     assert result["tool_events"] == []
     assert checkpoint_manager.load(session_id) is None
+
+
+def test_runner_uses_openai_previous_response_id_for_incremental_turn():
+    calls = []
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+
+    def fake_create(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(id="resp_2", output=[], output_text="done")
+
+    fake_client.responses.create = fake_create
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+
+    result = runner.run(
+        agent=agent,
+        history=[
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "new question"},
+        ],
+        provider_state=ProviderContextState(
+            provider="openai",
+            provider_mode="openai_previous_response",
+            last_response_id="resp_1",
+        ),
+    )
+
+    assert result["response_id"] == "resp_2"
+    assert calls == [{
+        "model": "test-model",
+        "input": [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "new question"},
+        ],
+        "tools": None,
+        "previous_response_id": "resp_1",
+        "store": True,
+    }]
+
+
+def test_runner_keeps_manual_provider_history_without_previous_response_id():
+    calls = []
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+
+    def fake_create(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(id="resp_2", output=[], output_text="done")
+
+    fake_client.responses.create = fake_create
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+    history = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new question"},
+    ]
+
+    result = runner.run(
+        agent=agent,
+        history=history,
+        provider_state=ProviderContextState(
+            provider="openai_compatible",
+            provider_mode="manual",
+        ),
+    )
+
+    assert result["response_id"] == "resp_2"
+    assert calls == [{
+        "model": "test-model",
+        "input": history,
+        "tools": None,
+    }]
+
+
+def test_runner_chains_current_response_id_for_tool_outputs():
+    calls = []
+    tool_calls = {"count": 0}
+    registry = ToolRegistry()
+    registry.register({
+        "name": "lookup",
+        "description": "Lookup once.",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": lambda: _count_tool_call(tool_calls),
+    })
+    function_call_item = SimpleNamespace(
+        type="function_call",
+        name="lookup",
+        arguments="{}",
+        call_id="call_1",
+    )
+    responses = [
+        SimpleNamespace(id="resp_tool", output=[function_call_item], output_text=""),
+        SimpleNamespace(id="resp_final", output=[], output_text="done"),
+    ]
+    fake_client = SimpleNamespace()
+    fake_client.responses = SimpleNamespace()
+
+    def fake_create(*args, **kwargs):
+        calls.append(kwargs)
+        return responses.pop(0)
+
+    fake_client.responses.create = fake_create
+    runner = AgentRunner(client=fake_client, max_steps=3, enable_tracing=False)
+    agent = ChatAgent(
+        name="chat-agent",
+        model="test-model",
+        system_prompt="You are a test agent.",
+    )
+
+    result = runner.run(
+        agent=agent,
+        history=[{"role": "user", "content": "lookup"}],
+        tool_registry=registry,
+        provider_state=ProviderContextState(
+            provider="openai",
+            provider_mode="openai_previous_response",
+            last_response_id="resp_prev",
+        ),
+    )
+
+    assert result["answer"] == "done"
+    assert result["response_id"] == "resp_final"
+    assert tool_calls["count"] == 1
+    assert calls[0]["previous_response_id"] == "resp_prev"
+    assert calls[1]["previous_response_id"] == "resp_tool"
+    assert calls[1]["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "called-1",
+        }
+    ]
 
 
 def test_runner_resumes_tool_output_without_repeating_tool(monkeypatch):

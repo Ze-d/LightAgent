@@ -1,4 +1,4 @@
-from typing import Any, Callable, Literal, TypedDict
+from typing import Any, Callable, Literal, NotRequired, TypedDict
 
 
 Role = Literal["system", "user", "assistant"]
@@ -53,6 +53,7 @@ class AgentRunResult(TypedDict):
     steps: int
     tool_events: list[ToolCallEvent]
     error: str | None
+    response_id: NotRequired[str | None]
 
 
 class RunStartEvent(TypedDict):

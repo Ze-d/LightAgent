@@ -45,6 +45,7 @@ from app.core.checkpoint import (
     ResumeContext,                                        # 恢复上下文
     ToolExecutionRecord,                                  # 工具执行记录
 )
+from app.core.context_builder import ProviderContextState  # Provider-side context state
 from app.core.skill_dispatcher import SkillDispatcher     # 技能调度器（处理 /skill 命令）
 
 # =============================================================================
@@ -181,14 +182,18 @@ class AgentRunner:
         steps: int,
         tool_events: list[ToolCallEvent],
         error: str | None,
+        response_id: str | None = None,
     ) -> AgentRunResult:
-        return {
+        result: AgentRunResult = {
             "answer": answer,
             "success": success,
             "steps": steps,
             "tool_events": tool_events,
             "error": error,
         }
+        if response_id is not None:
+            result["response_id"] = response_id
+        return result
 
     # -------------------------------------------------------------------------
     # 解析 Agent 可用工具列表
@@ -278,6 +283,49 @@ class AgentRunner:
             llm_context = self.middleware.before_llm(llm_context)
         return llm_context["current_input"]
 
+    def _uses_openai_previous_response(
+        self,
+        provider_state: ProviderContextState | None,
+    ) -> bool:
+        return (
+            provider_state is not None
+            and provider_state.provider == "openai"
+            and provider_state.provider_mode == "openai_previous_response"
+        )
+
+    def _input_for_previous_response(
+        self,
+        current_input: list[dict] | str,
+        previous_response_id: str | None,
+    ) -> list[dict] | str:
+        if previous_response_id is None or not isinstance(current_input, list):
+            return current_input
+        if not self._is_chat_message_history(current_input):
+            return current_input
+
+        system_messages = [
+            item for item in current_input
+            if item.get("role") == "system"
+        ]
+        latest_user_message = next(
+            (
+                item for item in reversed(current_input)
+                if item.get("role") == "user"
+            ),
+            None,
+        )
+        if latest_user_message is None:
+            return current_input
+        return [*system_messages, latest_user_message]
+
+    def _is_chat_message_history(self, current_input: list[dict]) -> bool:
+        return all(
+            isinstance(item, dict)
+            and item.get("role") in {"system", "user", "assistant"}
+            and "content" in item
+            for item in current_input
+        )
+
     # -------------------------------------------------------------------------
     # 带弹性机制的 LLM 调用
     # -------------------------------------------------------------------------
@@ -303,6 +351,8 @@ class AgentRunner:
         step: int,
         session_id: str | None,
         span: AgentSpan | None,
+        previous_response_id: str | None = None,
+        store_response: bool = False,
     ) -> Any:
         """Call the model with rate limiting, timeout, retry, and circuit breaker.
 
@@ -333,11 +383,16 @@ class AgentRunner:
         # ---- 构建 LLM 调用闭包 ----
         # 使用闭包包装以便重试逻辑可以重复调用
         def llm_call():
-            return self.client.responses.create(
-                model=agent.model,
-                input=current_input,
-                tools=tools if tools else None,  # None 表示不传 tools 参数
-            )
+            kwargs: dict[str, Any] = {
+                "model": agent.model,
+                "input": current_input,
+                "tools": tools if tools else None,  # None 表示不传 tools 参数
+            }
+            if previous_response_id is not None:
+                kwargs["previous_response_id"] = previous_response_id
+            if store_response:
+                kwargs["store"] = True
+            return self.client.responses.create(**kwargs)
 
         # ---- 第 3 层：超时控制 + 第 4 层：指数退避重试 ----
         try:
@@ -856,6 +911,7 @@ class AgentRunner:
         hooks: BaseRunnerHooks | None = None,
         session_id: str | None = None,
         resume_checkpoint: Checkpoint | None = None,
+        provider_state: ProviderContextState | None = None,
     ) -> AgentRunResult:
         """Execute one agent turn.
 
@@ -890,6 +946,15 @@ class AgentRunner:
         start_step = 1                                 # 起始步数，恢复模式可能 > 1
         run_id = str(uuid4())                          # 本次运行的唯一标识
         resume_tool_records: list[ToolExecutionRecord] | None = None  # 待恢复工具记录
+        use_openai_previous_response = self._uses_openai_previous_response(
+            provider_state
+        )
+        previous_response_id = (
+            provider_state.last_response_id
+            if use_openai_previous_response and provider_state is not None
+            else None
+        )
+        last_response_id: str | None = None
 
         # =================================================================
         # 阶段 2：检查点恢复
@@ -1084,6 +1149,13 @@ class AgentRunner:
                         session_id,
                     )
 
+                llm_input = self._input_for_previous_response(
+                    current_input,
+                    previous_response_id
+                    if use_openai_previous_response
+                    else None,
+                )
+
                 # ---------------------------------------------------------
                 # 4d. 保存检查点（before_llm 阶段）
                 # ---------------------------------------------------------
@@ -1092,7 +1164,7 @@ class AgentRunner:
                         session_id=session_id,
                         step=step,
                         phase="before_llm",
-                        current_input=current_input,
+                        current_input=llm_input,
                         agent=agent,
                         run_id=run_id,
                     )
@@ -1103,7 +1175,7 @@ class AgentRunner:
                     )
 
                 if span:
-                    span.start_llm_span(len(current_input))
+                    span.start_llm_span(len(llm_input))
 
                 # ---------------------------------------------------------
                 # 4e. LLM 调用（带超时/重试/熔断/限流弹性防护）
@@ -1111,11 +1183,17 @@ class AgentRunner:
                 try:
                     response = self._call_llm_with_resilience(
                         agent=agent,
-                        current_input=current_input,
+                        current_input=llm_input,
                         tools=tools,
                         step=step,
                         session_id=session_id,
                         span=span,
+                        previous_response_id=(
+                            previous_response_id
+                            if use_openai_previous_response
+                            else None
+                        ),
+                        store_response=use_openai_previous_response,
                     )
                 except CircuitBreakerOpenError:
                     if span:
@@ -1177,6 +1255,12 @@ class AgentRunner:
                         "output_items_count": len(response.output),
                     })
 
+                response_id = getattr(response, "id", None)
+                if isinstance(response_id, str) and response_id:
+                    last_response_id = response_id
+                    if use_openai_previous_response:
+                        previous_response_id = response_id
+
                 # ---------------------------------------------------------
                 # 4g. 解析 LLM 响应：文本答案 vs 工具调用请求
                 # ---------------------------------------------------------
@@ -1200,6 +1284,7 @@ class AgentRunner:
                             steps=step,
                             tool_events=collected_events,
                             error=None,
+                            response_id=last_response_id,
                         ),
                         run_started_at,
                         session_id,

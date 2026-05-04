@@ -40,6 +40,7 @@ from app.core.context_state import (
     BaseContextStore,
     ContextChannel,
     InMemoryContextStore,
+    ProviderMode,
 )
 from app.core.context_builder import ContextBuilder, ContextEnvelope
 from app.core.event_channel import EventChannel
@@ -162,6 +163,12 @@ def _default_provider() -> str:
     return "openai_compatible"
 
 
+def _default_provider_mode() -> ProviderMode:
+    if _default_provider() == "openai":
+        return "openai_previous_response"
+    return "manual"
+
+
 def _strip_memory_messages(history: list[ChatMessage]) -> list[ChatMessage]:
     """Remove transient memory context before persisting or rebuilding history."""
     return context_builder.strip_transient_context(history)
@@ -205,6 +212,7 @@ def _create_session() -> tuple[str, list[ChatMessage]]:
         channel="chat",
         session_id=session_id,
         provider=_default_provider(),
+        provider_mode=_default_provider_mode(),
     )
     logger.debug("api event=session_created session_id=%s", session_id)
     return session_id, history
@@ -236,6 +244,7 @@ def _ensure_context_state(
         session_id=session_id,
         external_context_id=external_context_id,
         provider=_default_provider(),
+        provider_mode=_default_provider_mode(),
     )
 
 
@@ -322,13 +331,34 @@ def _run_agent(
     resume_checkpoint: Checkpoint | None = None,
 ) -> AgentRunResult:
     """Call AgentRunner with the app-level registry."""
-    return runner.run(
+    run_result = runner.run(
+        provider_state=context_envelope.provider_state,
         agent=agent,
         history=context_envelope.messages,
         tool_registry=tool_registry,
         hooks=hooks,
         session_id=session_id,
         resume_checkpoint=resume_checkpoint,
+    )
+    _persist_provider_response_id(context_envelope, run_result)
+    return run_result
+
+
+def _persist_provider_response_id(
+    context_envelope: ContextEnvelope,
+    run_result: AgentRunResult,
+) -> None:
+    response_id = run_result.get("response_id")
+    if (
+        not run_result["success"]
+        or not response_id
+        or context_envelope.provider_state.provider != "openai"
+        or context_envelope.provider_state.provider_mode != "openai_previous_response"
+    ):
+        return
+    context_store.update_provider_state(
+        context_envelope.session_id,
+        last_response_id=response_id,
     )
 
 
@@ -360,6 +390,7 @@ def _load_or_create_a2a_session(context_id: str) -> tuple[str, list[ChatMessage]
         channel="a2a",
         external_context_id=context_id,
         provider=_default_provider(),
+        provider_mode=_default_provider_mode(),
     )
     session_id = context_state.session_id
     history = session_manager.load(session_id)
