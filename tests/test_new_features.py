@@ -6,7 +6,6 @@ from uuid import uuid4
 from app.core.tool_registry import ToolRegistry
 from app.memory.document_store import DocumentMemoryStore
 from app.memory.summarizer import MessageSummarizer
-from app.middleware.history_trim_middleware import HistoryTrimMiddleware
 from app.security.input_guard import InputGuardMiddleware
 from app.core.middleware import MiddlewareAbort
 from app.tools import memory_tools
@@ -122,52 +121,6 @@ class TestMemorySummarizer:
         assert result[-1]["content"] == "Latest"
 
 
-class TestHistoryTrimMiddleware:
-    def test_summarizes_large_chat_history(self):
-        middleware = HistoryTrimMiddleware(max_messages=5)
-        messages = [{"role": "system", "content": "System prompt"}]
-        for i in range(10):
-            messages.append({"role": "user", "content": f"Message {i}"})
-
-        context = {"current_input": messages}
-        result = middleware.before_llm(context)
-
-        current_input = result["current_input"]
-        assert len(current_input) <= 5
-        assert current_input[0]["content"] == "System prompt"
-        assert "summary" in current_input[1]["content"].lower()
-
-    def test_does_not_summarize_tool_outputs(self):
-        middleware = HistoryTrimMiddleware(max_messages=2)
-        current_input = [
-            {"type": "function_call_output", "call_id": "1", "output": "a"},
-            {"type": "function_call_output", "call_id": "2", "output": "b"},
-            {"type": "function_call_output", "call_id": "3", "output": "c"},
-        ]
-
-        context = {"current_input": current_input}
-        result = middleware.before_llm(context)
-
-        assert result["current_input"] == current_input
-
-    def test_trims_chat_history_by_token_budget(self):
-        middleware = HistoryTrimMiddleware(max_messages=0, max_input_tokens=45)
-        current_input = [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "old " * 40},
-            {"role": "assistant", "content": "old answer " * 40},
-            {"role": "user", "content": "new question"},
-        ]
-
-        context = {"current_input": current_input}
-        result = middleware.before_llm(context)
-
-        assert result["current_input"] == [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "new question"},
-        ]
-
-
 class TestDocumentMemoryStore:
     def _store(self) -> DocumentMemoryStore:
         return DocumentMemoryStore(Path("test-runtime") / "memory" / str(uuid4()))
@@ -219,10 +172,10 @@ class TestDocumentMemoryStore:
         assert "second" in memory
         assert "third" in memory
 
-    def test_memory_tools_use_document_store(self, monkeypatch):
+    def test_memory_tools_use_document_store(self):
         store = self._store()
         session_id = f"test-{uuid4()}"
-        monkeypatch.setattr(memory_tools, "_memory_store", store)
+        memory_tools.init_memory_store(store)
 
         registry = build_default_registry()
         append_result = registry.call(

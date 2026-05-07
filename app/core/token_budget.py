@@ -28,6 +28,8 @@ class EstimatedTokenCounter:
 
     This intentionally avoids a tokenizer dependency. It counts CJK characters
     closer to one token each and non-CJK text at roughly four chars per token.
+
+    Use with_tokenizer() to create a counter backed by tiktoken when available.
     """
 
     def count_messages(self, messages: list[dict[str, Any]]) -> int:
@@ -59,6 +61,40 @@ class EstimatedTokenCounter:
             or 0x3040 <= codepoint <= 0x30FF
             or 0xAC00 <= codepoint <= 0xD7AF
         )
+
+    @classmethod
+    def with_tokenizer(cls, model: str = "gpt-4o") -> EstimatedTokenCounter:
+        """Create a counter using tiktoken if available; falls back to heuristic."""
+        try:
+            import tiktoken
+            encoding = tiktoken.encoding_for_model(model)
+            return _TiktokenCounter(encoding)
+        except (ImportError, KeyError):
+            return cls()
+
+
+class _TiktokenCounter(EstimatedTokenCounter):
+    """Token counter backed by tiktoken for accurate OpenAI model token counting."""
+
+    def __init__(self, encoding: Any) -> None:
+        super().__init__()
+        self._encoding = encoding
+
+    def count_text(self, text: str) -> int:
+        if not text:
+            return 0
+        try:
+            return len(self._encoding.encode(text))
+        except Exception:
+            return super().count_text(text)
+
+    def count_message(self, message: dict[str, Any]) -> int:
+        try:
+            role = str(message.get("role", ""))
+            content = str(message.get("content", ""))
+            return 4 + len(self._encoding.encode(role)) + len(self._encoding.encode(content))
+        except Exception:
+            return super().count_message(message)
 
 
 def trim_text_to_token_budget(

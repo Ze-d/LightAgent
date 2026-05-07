@@ -5,6 +5,15 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.core.context_pipeline import (
+    ContextPipeline,
+    DeduplicationProcessor,
+    DynamicBudgetAllocator,
+    HierarchicalSummarizer,
+    ImportanceScorer,
+    IntelligentTrimmer,
+    TrimResult,
+)
 from app.core.context_state import ContextChannel, ContextState, ProviderMode
 from app.core.token_budget import (
     BudgetStatus,
@@ -20,6 +29,16 @@ MEMORY_CONTEXT_PREFIX = "[Memory]\n"
 
 class MemoryContextProvider(Protocol):
     def build_context(self, session_id: str | None = None) -> str:
+        pass
+
+    def semantic_build_context(
+        self,
+        query: str,
+        session_id: str | None = None,
+        *,
+        top_k: int = 5,
+        min_score: float = 0.3,
+    ) -> str:
         pass
 
 
@@ -69,15 +88,103 @@ class ContextBuilder:
         memory_prefix: str = MEMORY_CONTEXT_PREFIX,
         max_input_tokens: int | None = None,
         memory_max_tokens: int | None = None,
+        pipeline_enabled: bool = True,
+        dedup_enabled: bool = True,
+        importance_scores: dict[str, int] | None = None,
+        importance_recent_window: int = 3,
+        importance_decay_per_turn: int = 5,
+        importance_decay_per_tool: int = 8,
+        summary_max_level: int = 3,
+        summary_turns_per_group: int = 5,
+        dynamic_budget_enabled: bool = True,
+        llm_client: Any = None,
     ) -> None:
         self.memory_store = memory_store
         self.memory_prefix = memory_prefix
         self.max_input_tokens = max_input_tokens
         self.memory_max_tokens = memory_max_tokens
-        self.token_counter = EstimatedTokenCounter()
+        self.pipeline_enabled = pipeline_enabled
+        self.token_counter = EstimatedTokenCounter.with_tokenizer()
+
+        # Legacy trimmer (used when pipeline is disabled)
         self.token_budget = TokenBudgetTrimmer(
             max_input_tokens=max_input_tokens,
         )
+
+        if pipeline_enabled:
+            scores = importance_scores or {}
+            self.pipeline = ContextPipeline(
+                processors=self._build_processors(
+                    dedup_enabled=dedup_enabled,
+                    scores=scores,
+                    recent_window=importance_recent_window,
+                    decay_per_turn=importance_decay_per_turn,
+                    decay_per_tool=importance_decay_per_tool,
+                    summary_max_level=summary_max_level,
+                    summary_turns_per_group=summary_turns_per_group,
+                    dynamic_budget_enabled=dynamic_budget_enabled,
+                    llm_client=llm_client,
+                )
+            )
+        else:
+            self.pipeline = None
+
+    def _build_processors(
+        self,
+        *,
+        dedup_enabled: bool,
+        scores: dict[str, int],
+        recent_window: int,
+        decay_per_turn: int,
+        decay_per_tool: int,
+        summary_max_level: int,
+        summary_turns_per_group: int,
+        dynamic_budget_enabled: bool,
+        llm_client: Any = None,
+    ) -> list:
+        processors: list = []
+
+        if dedup_enabled:
+            processors.append(DeduplicationProcessor())
+
+        processors.append(
+            ImportanceScorer(
+                score_system_prompt=scores.get("system_prompt", 100),
+                score_recent_exchange=scores.get("recent_exchange", 90),
+                score_recent_tool_output=scores.get("recent_tool_output", 85),
+                score_summary=scores.get("summary", 70),
+                score_older_exchange=scores.get("older_exchange", 60),
+                score_older_tool_output=scores.get("older_tool_output", 50),
+                score_transient_memory=scores.get("transient_memory", 30),
+                recent_window=recent_window,
+                decay_per_turn=decay_per_turn,
+                decay_per_tool=decay_per_tool,
+                memory_prefix=self.memory_prefix,
+            )
+        )
+
+        processors.append(
+            HierarchicalSummarizer(
+                max_level=summary_max_level,
+                turns_per_group=summary_turns_per_group,
+                llm_client=llm_client,
+            )
+        )
+
+        if dynamic_budget_enabled:
+            processors.append(
+                DynamicBudgetAllocator(
+                    max_input_tokens=self.max_input_tokens,
+                )
+            )
+
+        processors.append(
+            IntelligentTrimmer(
+                max_input_tokens=self.max_input_tokens,
+            )
+        )
+
+        return processors
 
     def build(
         self,
@@ -89,11 +196,28 @@ class ContextBuilder:
         checkpoint_input: list[dict[str, Any]] | str | None = None,
     ) -> ContextEnvelope:
         clean_history = self.strip_transient_context(history)
-        memory_context = self._build_memory_context(context_state.session_id)
+        query = self._extract_last_user_message(history)
+        memory_context = self._build_memory_context(
+            context_state.session_id, query=query,
+        )
         memory_context, memory_truncated = self._fit_memory_context(memory_context)
         messages = self._inject_memory_context(clean_history, memory_context)
-        budget_result = self.token_budget.apply(messages)
-        messages = budget_result.messages
+
+        if self.pipeline_enabled and self.pipeline is not None:
+            pipeline_result = self.pipeline.run(messages)
+            messages = pipeline_result.messages
+            trim_result: TrimResult | None = pipeline_result.metadata.get("trim_result")
+            budget = self._build_budget_from_pipeline(pipeline_result, trim_result)
+        else:
+            budget_result = self.token_budget.apply(messages)
+            messages = budget_result.messages
+            budget = ContextBudget(
+                status=budget_result.status,
+                max_input_tokens=budget_result.max_input_tokens,
+                input_tokens=budget_result.input_tokens,
+                reason=budget_result.reason,
+                dropped_messages=budget_result.dropped_messages,
+            )
 
         return ContextEnvelope(
             session_id=context_state.session_id,
@@ -120,15 +244,18 @@ class ContextBuilder:
             summary_messages=deepcopy(summary_messages or []),
             tool_outputs=deepcopy(tool_outputs or []),
             checkpoint_input=deepcopy(checkpoint_input),
-            budget=ContextBudget(
-                status=budget_result.status,
-                max_input_tokens=budget_result.max_input_tokens,
-                input_tokens=budget_result.input_tokens,
-                reason=budget_result.reason,
-                dropped_messages=budget_result.dropped_messages,
-            ),
+            budget=budget,
             metadata=deepcopy(context_state.metadata),
         )
+
+    @staticmethod
+    def _extract_last_user_message(history: list[ChatMessage]) -> str | None:
+        for message in reversed(history):
+            if message.get("role") == "user":
+                content = message.get("content", "")
+                if content:
+                    return content
+        return None
 
     def strip_transient_context(
         self,
@@ -152,9 +279,14 @@ class ContextBuilder:
     ) -> bool:
         return any(self._is_transient_memory_message(message) for message in messages)
 
-    def _build_memory_context(self, session_id: str) -> str:
+    def _build_memory_context(self, session_id: str, query: str | None = None) -> str:
         if self.memory_store is None:
             return ""
+        if query and hasattr(self.memory_store, "semantic_build_context"):
+            return self.memory_store.semantic_build_context(
+                query=query,
+                session_id=session_id,
+            )
         return self.memory_store.build_context(session_id=session_id)
 
     def _fit_memory_context(self, memory_context: str) -> tuple[str, bool]:
@@ -290,3 +422,34 @@ class ContextBuilder:
         if clean_history and clean_history[0].get("role") == "system":
             return [clean_history[0], memory_message, *clean_history[1:]]
         return [memory_message, *clean_history]
+
+    def _build_budget_from_pipeline(
+        self,
+        pipeline_result: Any,
+        trim_result: TrimResult | None,
+    ) -> ContextBudget:
+        if trim_result is None:
+            return ContextBudget(
+                status="estimated" if self.max_input_tokens else "not_applied",
+                max_input_tokens=self.max_input_tokens,
+                input_tokens=(
+                    self.token_counter.count_messages(pipeline_result.messages)
+                    if self.max_input_tokens
+                    else None
+                ),
+                reason="within_budget",
+                dropped_messages=0,
+            )
+
+        status: BudgetStatus = (
+            "estimated" if self.max_input_tokens else "not_applied"
+        )
+        input_tokens = self.token_counter.count_messages(trim_result.messages)
+
+        return ContextBudget(
+            status=status,
+            max_input_tokens=self.max_input_tokens,
+            input_tokens=input_tokens,
+            reason=trim_result.reason,
+            dropped_messages=trim_result.dropped_count + trim_result.summarized_count,
+        )

@@ -15,9 +15,17 @@ from app.tools.builtin_tools import (
 )
 from app.tools.memory_tools import (
     memory_append_session_summary,
+    memory_consolidate,
     memory_read,
+    memory_search,
+    memory_stats,
+    memory_write,
     MemoryAppendSessionSummaryInput,
+    MemoryConsolidateInput,
     MemoryReadInput,
+    MemorySearchInput,
+    MemoryStatsInput,
+    MemoryWriteInput,
 )
 from app.tools.validator import create_tool_spec
 
@@ -88,6 +96,53 @@ def build_default_registry() -> ToolRegistry:
         ),
         model_cls=MemoryAppendSessionSummaryInput,
         handler=memory_append_session_summary,
+        side_effect_policy="non_idempotent",
+    ))
+
+    registry.register(create_tool_spec(
+        name="memory_search",
+        description=(
+            "Semantic search across stored memories. Use this to find relevant "
+            "past information, facts, decisions, or user preferences. Supports "
+            "searching by project, user, session scope, or all scopes."
+        ),
+        model_cls=MemorySearchInput,
+        handler=memory_search,
+    ))
+
+    registry.register(create_tool_spec(
+        name="memory_write",
+        description=(
+            "Write new information into project or user memory. Use this when "
+            "the user asks to remember something permanently for future sessions. "
+            "Project memory: stable project context, architecture, conventions. "
+            "User memory: user preferences, style choices, recurring constraints. "
+            "Use mode='append' to add or mode='replace' to overwrite."
+        ),
+        model_cls=MemoryWriteInput,
+        handler=memory_write,
+        side_effect_policy="non_idempotent",
+    ))
+
+    registry.register(create_tool_spec(
+        name="memory_stats",
+        description=(
+            "View statistics about the memory system: how many entries exist per "
+            "scope, whether the file-based store and vector store are populated."
+        ),
+        model_cls=MemoryStatsInput,
+        handler=memory_stats,
+    ))
+
+    registry.register(create_tool_spec(
+        name="memory_consolidate",
+        description=(
+            "Manually trigger memory consolidation: deduplicate similar entries, "
+            "decay importance of stale entries, and promote frequently verified "
+            "facts to cross-session knowledge."
+        ),
+        model_cls=MemoryConsolidateInput,
+        handler=memory_consolidate,
         side_effect_policy="non_idempotent",
     ))
 

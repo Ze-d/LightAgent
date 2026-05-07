@@ -11,13 +11,36 @@ from app.configs.config import (
     A2A_EXTENDED_CARD_TOKEN,
     A2A_ICON_URL,
     A2A_PUBLIC_URL,
+    CONTEXT_DECAY_PER_TOOL,
+    CONTEXT_DECAY_PER_TURN,
+    CONTEXT_DEDUP_ENABLED,
+    CONTEXT_DYNAMIC_BUDGET_ENABLED,
     CONTEXT_MAX_INPUT_TOKENS,
     CONTEXT_MEMORY_MAX_TOKENS,
+    CONTEXT_PIPELINE_ENABLED,
+    CONTEXT_RECENT_WINDOW,
+    CONTEXT_SCORE_OLDER_EXCHANGE,
+    CONTEXT_SCORE_OLDER_TOOL_OUTPUT,
+    CONTEXT_SCORE_RECENT_EXCHANGE,
+    CONTEXT_SCORE_RECENT_TOOL_OUTPUT,
+    CONTEXT_SCORE_SUMMARY,
+    CONTEXT_SCORE_SYSTEM_PROMPT,
+    CONTEXT_SCORE_TRANSIENT_MEMORY,
+    CONTEXT_SUMMARY_MAX_LEVEL,
+    CONTEXT_SUMMARY_TURNS_PER_GROUP,
     LLM_API_KEY,
     LLM_BASE_URL,
+    LLM_EMBEDDING_MODEL,
     LLM_MODEL_ID,
     LLM_TIMEOUT,
     MAX_STEPS,
+    MEMORY_CONSOLIDATION_INTERVAL,
+    MEMORY_CROSS_SESSION_THRESHOLD,
+    MEMORY_DEDUP_THRESHOLD,
+    MEMORY_IMPORTANCE_DECAY,
+    MEMORY_SEARCH_MIN_SCORE,
+    MEMORY_SEARCH_TOP_K,
+    MEMORY_VECTOR_ENABLED,
     STATE_BACKEND,
     STATE_DB_PATH,
 )
@@ -32,7 +55,6 @@ from app.core.hooks import CompositeRunnerHooks
 from app.core.middleware import CompositeRunnerMiddleware
 from app.hooks.logging_hooks import LoggingHooks
 from app.hooks.sse_hooks import SSEHooks
-from app.middleware.history_trim_middleware import HistoryTrimMiddleware
 from app.middleware.tool_permission_middleware import ToolPermissionMiddleware
 from app.security.input_guard import InputGuardMiddleware
 from app.prompts.prompt import SYSTEM_PROMPT
@@ -62,9 +84,14 @@ from app.core.checkpoint import (
 )
 from app.core.cancellation import CancellationToken
 from app.tools.register import build_default_registry
+from app.tools.memory_tools import init_memory_store
 from app.skills.register import build_default_skills
 from app.core.skill_dispatcher import SkillDispatcher
 from app.memory.document_store import DocumentMemoryStore
+from app.memory.consolidator import MemoryConsolidator
+from app.memory.embedding import EmbeddingService
+from app.memory.extractor import KnowledgeExtractor
+from app.memory.vector_store import VectorMemoryStore
 from app.mcp.config import load_mcp_config
 from app.mcp.tool_registry import MCPToolRegistry
 
@@ -116,14 +143,6 @@ async def lifespan(app: FastAPI):
 composite_hooks = CompositeRunnerHooks([LoggingHooks()])
 composite_middleware = CompositeRunnerMiddleware([
     InputGuardMiddleware(),
-    HistoryTrimMiddleware(
-        max_messages=0,
-        max_input_tokens=(
-            CONTEXT_MAX_INPUT_TOKENS
-            if CONTEXT_MAX_INPUT_TOKENS > 0
-            else None
-        ),
-    ),
     ToolPermissionMiddleware(blocked_tools={"dangerous_tool"}),
 ])
 
@@ -192,11 +211,74 @@ runner = AgentRunner(
     middleware=composite_middleware,
     checkpoint=checkpoint_orchestrator,
 )
-memory_store = DocumentMemoryStore()
+# Initialize embedding service and vector store when enabled.
+_embedding_service: EmbeddingService | None = None
+_vector_store: VectorMemoryStore | None = None
+if MEMORY_VECTOR_ENABLED and LLM_API_KEY:
+    _embedding_service = EmbeddingService(client=client, model=LLM_EMBEDDING_MODEL)
+    _vector_store = VectorMemoryStore(STATE_DB_PATH)
+    logger.info(
+        "api event=vector_store_init embedding_model=%s db=%s",
+        LLM_EMBEDDING_MODEL,
+        STATE_DB_PATH,
+    )
+
+memory_store = DocumentMemoryStore(
+    vector_store=_vector_store,
+    embedding_service=_embedding_service,
+)
+init_memory_store(memory_store)
+
+# Initialize consolidator and knowledge extractor.
+_consolidator: MemoryConsolidator | None = None
+_knowledge_extractor: KnowledgeExtractor | None = None
+if _vector_store is not None:
+    _consolidator = MemoryConsolidator(
+        vector_store=_vector_store,
+        dedup_threshold=MEMORY_DEDUP_THRESHOLD,
+        importance_decay=MEMORY_IMPORTANCE_DECAY,
+        cross_session_threshold=MEMORY_CROSS_SESSION_THRESHOLD,
+        consolidation_interval=MEMORY_CONSOLIDATION_INTERVAL,
+    )
+    # Attach consolidator to memory store so tools can trigger manual consolidation
+    memory_store._consolidator = _consolidator  # type: ignore[attr-defined]
+    _knowledge_extractor = KnowledgeExtractor(client=client, model=LLM_MODEL_ID)
+    logger.info("api event=consolidator_init interval=%d", MEMORY_CONSOLIDATION_INTERVAL)
+
+    # Index existing project/user memory into vector store on startup.
+    try:
+        memory_store.index_project_memory()
+        memory_store.index_user_memory()
+    except Exception:
+        logger.warning("api event=memory_index_startup_failed", exc_info=True)
+
+    # Run initial consolidation pass.
+    try:
+        _consolidator.run()
+    except Exception:
+        logger.warning("api event=consolidator_startup_failed", exc_info=True)
 context_builder = ContextBuilder(
     memory_store=memory_store,
     max_input_tokens=_context_max_input_tokens(),
     memory_max_tokens=_context_memory_max_tokens(),
+    pipeline_enabled=CONTEXT_PIPELINE_ENABLED,
+    dedup_enabled=CONTEXT_DEDUP_ENABLED,
+    importance_scores={
+        "system_prompt": CONTEXT_SCORE_SYSTEM_PROMPT,
+        "recent_exchange": CONTEXT_SCORE_RECENT_EXCHANGE,
+        "recent_tool_output": CONTEXT_SCORE_RECENT_TOOL_OUTPUT,
+        "summary": CONTEXT_SCORE_SUMMARY,
+        "older_exchange": CONTEXT_SCORE_OLDER_EXCHANGE,
+        "older_tool_output": CONTEXT_SCORE_OLDER_TOOL_OUTPUT,
+        "transient_memory": CONTEXT_SCORE_TRANSIENT_MEMORY,
+    },
+    importance_recent_window=CONTEXT_RECENT_WINDOW,
+    importance_decay_per_turn=CONTEXT_DECAY_PER_TURN,
+    importance_decay_per_tool=CONTEXT_DECAY_PER_TOOL,
+    summary_max_level=CONTEXT_SUMMARY_MAX_LEVEL,
+    summary_turns_per_group=CONTEXT_SUMMARY_TURNS_PER_GROUP,
+    dynamic_budget_enabled=CONTEXT_DYNAMIC_BUDGET_ENABLED,
+    llm_client=client,
 )
 tool_registry = build_default_registry()
 skill_registry = build_default_skills()
@@ -271,19 +353,62 @@ def _build_context_envelope(
     )
 
 
+# Track session turn counts for knowledge extraction triggers.
+_session_turn_counts: dict[str, int] = {}
+
+
 def _record_session_memory(session_id: str, user_message: str, assistant_message: str) -> None:
     """Best-effort memory write; chat responses should not fail on memory errors."""
     try:
-        memory_store.append_session_exchange(
-            session_id=session_id,
+        summary = memory_store.summarizer.summarize_exchange(
             user_message=user_message,
             assistant_message=assistant_message,
         )
-    except Exception as e:
+        memory_store.append_session_summary(session_id, summary)
+        # Also index into vector store for semantic retrieval
+        if _vector_store is not None:
+            memory_store.index_session_entry(session_id, summary)
+        # Notify consolidator of write
+        if _consolidator is not None:
+            _consolidator.on_write()
+    except Exception as exc:
         logger.warning(
             "api event=session_memory_write_failed session_id=%s error_type=%s",
             session_id,
-            type(e).__name__,
+            type(exc).__name__,
+            exc_info=True,
+        )
+
+
+def _maybe_extract_knowledge(session_id: str, history: list[ChatMessage]) -> None:
+    """Trigger knowledge extraction after enough conversation turns."""
+    if _knowledge_extractor is None or _vector_store is None:
+        return
+
+    _session_turn_counts[session_id] = _session_turn_counts.get(session_id, 0) + 1
+    turn_count = _session_turn_counts[session_id]
+
+    if not _knowledge_extractor.should_extract(turn_count):
+        return
+
+    # Reset counter to avoid repeated extraction for the same session
+    _session_turn_counts[session_id] = 0
+
+    try:
+        facts = _knowledge_extractor.extract(history)
+        if facts and _consolidator is not None:
+            stored = _consolidator.store_knowledge_facts(facts, session_id)
+            logger.info(
+                "api event=knowledge_extracted session_id=%s facts=%d stored=%d",
+                session_id,
+                len(facts),
+                stored,
+            )
+    except Exception:
+        logger.warning(
+            "api event=knowledge_extract_failed session_id=%s",
+            session_id,
+            exc_info=True,
         )
 
 
@@ -463,6 +588,7 @@ def _persist_assistant_turn(
     session_manager.save(session_id, history)
     context_store.bump_history_version(session_id)
     _record_session_memory(session_id, user_message, answer)
+    _maybe_extract_knowledge(session_id, history)
 
 
 def _last_user_message(history: list[ChatMessage]) -> str:
