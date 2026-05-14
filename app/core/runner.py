@@ -29,6 +29,11 @@ from app.obj.types import (
 )
 from app.agents.agent_base import BaseAgent               # Agent 基类
 from app.core.tool_registry import ToolRegistry           # 工具注册中心，管理所有可用工具
+from app.core.tool_selection import (
+    ScopedToolRegistryView,
+    ToolCatalog,
+    ToolSelectionRequest,
+)
 from app.core.resilience import (
     with_timeout,                                         # 超时装饰器
     TimeoutError as ToolTimeoutError,                     # 超时异常（重命名为工具超时）
@@ -98,6 +103,7 @@ class AgentRunner:
         llm_circuit_breaker: CircuitBreaker | None = None,
         skill_dispatcher: SkillDispatcher | None = None,
         checkpoint: CheckpointOrchestrator | None = None,
+        tool_selector: Any | None = None,
     ):
         # ---- LLM 客户端与基础配置 ----
         self.client = client                # OpenAI 客户端实例
@@ -113,6 +119,7 @@ class AgentRunner:
         self.llm_circuit_breaker = llm_circuit_breaker  # LLM 级别熔断器
         self.skill_dispatcher = skill_dispatcher        # 技能调度器（处理 /skill 命令）
         self._checkpoint = checkpoint       # 检查点编排器（保存/恢复/清理，可选）
+        self.tool_selector = tool_selector  # 可选：单轮工具暴露选择器
 
         # ---- 内部状态 ----
         # 按工具名存储的熔断器字典，每个工具独立熔断
@@ -244,6 +251,44 @@ class AgentRunner:
         if tool_registry and agent.supports_tools():
             return tool_registry.get_openai_tools()
         return []
+
+    def _resolve_tool_scope(
+        self,
+        agent: BaseAgent,
+        tool_registry: Any | None,
+        history: list[ChatMessage],
+        resume_checkpoint: Checkpoint | None = None,
+    ) -> tuple[list[dict[str, Any]], Any | None]:
+        if not tool_registry or not agent.supports_tools():
+            return [], tool_registry
+        if self.tool_selector is None:
+            return tool_registry.get_openai_tools(), tool_registry
+
+        catalog = ToolCatalog.from_registry(tool_registry)
+        required_tools = [
+            record.tool_name
+            for record in (resume_checkpoint.tool_calls if resume_checkpoint else [])
+        ]
+        selection = self.tool_selector.select(
+            catalog,
+            ToolSelectionRequest(
+                query=self._tool_selection_query(history),
+                history=history,
+                required_tools=required_tools,
+            ),
+        )
+        scoped_registry = ScopedToolRegistryView(
+            tool_registry,
+            selection.selected_names,
+            catalog=catalog,
+        )
+        return scoped_registry.get_openai_tools(), scoped_registry
+
+    def _tool_selection_query(self, history: list[ChatMessage]) -> str:
+        for message in reversed(history):
+            if message.get("role") == "user":
+                return message.get("content", "")
+        return ""
 
     # -------------------------------------------------------------------------
     # 启动追踪 Span
@@ -1020,7 +1065,12 @@ class AgentRunner:
                 start_step = self.max_steps + 1
 
         # ---- 解析工具列表 + 记录运行开始日志 ----
-        tools = self._resolve_tools(agent, tool_registry)
+        tools, effective_tool_registry_for_run = self._resolve_tool_scope(
+            agent,
+            tool_registry,
+            history,
+            resume_checkpoint,
+        )
         logger.info(
             "runner event=run_start agent=%s session_id=%s model=%s "
             "history_length=%s max_steps=%s tools_count=%s resume=%s "
@@ -1108,7 +1158,7 @@ class AgentRunner:
                 # 4a. 工具恢复路径（从检查点恢复时，先完成未执行的工具调用）
                 # ---------------------------------------------------------
                 if resume_tool_records is not None:
-                    if tool_registry is None:
+                    if effective_tool_registry_for_run is None:
                         if span:
                             span.end_all()
                         return self._finish_run(
@@ -1127,7 +1177,7 @@ class AgentRunner:
 
                     next_input, blocked_record = self._execute_tool_records(
                         agent=agent,
-                        tool_registry=tool_registry,
+                        tool_registry=effective_tool_registry_for_run,
                         hooks=effective_hooks,
                         span=span,
                         collected_events=collected_events,
@@ -1348,7 +1398,7 @@ class AgentRunner:
                     )
 
                 # LLM 请求了工具调用，但未配置工具注册中心 → 返回配置错误
-                if tool_registry is None:
+                if effective_tool_registry_for_run is None:
                     if span:
                         span.end_all()
                     if self._checkpoint:
@@ -1372,7 +1422,7 @@ class AgentRunner:
                 # ---------------------------------------------------------
                 tool_records = CheckpointOrchestrator.build_tool_records(
                     function_calls=function_calls,
-                    tool_registry=tool_registry,
+                    tool_registry=effective_tool_registry_for_run,
                     run_id=run_id,
                 )
                 if self._checkpoint:
@@ -1396,7 +1446,7 @@ class AgentRunner:
                 # ---------------------------------------------------------
                 next_input, blocked_record = self._execute_tool_records(
                     agent=agent,
-                    tool_registry=tool_registry,
+                    tool_registry=effective_tool_registry_for_run,
                     hooks=effective_hooks,
                     span=span,
                     collected_events=collected_events,

@@ -23,6 +23,15 @@ class ToolRegistry:
         spec = self._tools.get(name)
         return None if spec is None else spec["handler"]
 
+    def get_spec(self, name: str) -> ToolSpec:
+        spec = self._tools.get(name)
+        if spec is None:
+            raise ValueError(f"Unknown tool: {name}")
+        return dict(spec)
+
+    def list_specs(self) -> list[ToolSpec]:
+        return [dict(spec) for spec in self._tools.values()]
+
     def get_openai_tools(self) -> list[dict[str, Any]]:
         return [
             {

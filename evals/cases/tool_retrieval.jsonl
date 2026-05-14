@@ -1,0 +1,19 @@
+{"id":"retrieve_calculator","input":"Calculate 18 * 7.","expected_tools":["calculator"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_markdown_table","input":"Render rows as a Markdown table.","expected_tools":["render_markdown_table"],"irrelevant_tools":["hash_text"]}
+{"id":"retrieve_keywords","input":"Extract top keywords from agent runtime notes.","expected_tools":["extract_keywords"],"irrelevant_tools":["date_diff"]}
+{"id":"retrieve_url_validation","input":"Validate whether https://example.com is a valid URL.","expected_tools":["validate_url"],"irrelevant_tools":["calculator"]}
+{"id":"retrieve_hash_text","input":"Hash this text with sha256.","expected_tools":["hash_text"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_regex","input":"Find email addresses with a regex pattern.","expected_tools":["regex_extract"],"irrelevant_tools":["csv_summarize"]}
+{"id":"retrieve_business_days","input":"Add five business days to 2026-05-14.","expected_tools":["add_business_days"],"irrelevant_tools":["sort_items"]}
+{"id":"retrieve_knowledge","input":"Search the local knowledge base for ToolRegistry schema.","expected_tools":["search_knowledge"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_a2a_researcher","input":"Delegate deep research to a remote researcher agent.","expected_tools":["a2a:researcher:run"],"irrelevant_tools":["a2a:reporter:run"],"max_tools_per_namespace":3}
+{"id":"retrieve_github_search","input":"Search GitHub issues for open runtime bugs.","expected_tools":["mcp:github:search_issues"],"irrelevant_tools":["mcp:github:create_issue"],"max_tools_per_namespace":3}
+{"id":"retrieve_github_prs","input":"List GitHub pull requests for the repository.","expected_tools":["mcp:github:list_pull_requests"],"max_tools_per_namespace":3}
+{"id":"retrieve_github_create_issue","input":"Create a GitHub issue for this bug report.","expected_tools":["mcp:github:create_issue"],"max_tools_per_namespace":3}
+{"id":"retrieve_knowledge_to_table","input":"Search the local knowledge base for ToolRegistry schema and render the results as a Markdown table.","expected_tools":["search_knowledge","render_markdown_table"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_keyword_pipeline","input":"Extract keywords from agent runtime notes, remove duplicate lines, sort the items, and render a Markdown table.","expected_tools":["extract_keywords","dedupe_lines","sort_items","render_markdown_table"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_memory_update_pipeline","input":"Search memory for previous ToolRegistry decisions and append a new session summary.","expected_tools":["memory_search","memory_append_session_summary"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_csv_json_table_pipeline","input":"Summarize CSV headers, read a JSON dotted path, and render both results as a Markdown table.","expected_tools":["csv_summarize","json_path_read","render_markdown_table"],"irrelevant_tools":["hash_text"]}
+{"id":"retrieve_url_date_hash_pipeline","input":"Validate a URL, add five business days, and hash the final note with sha256.","expected_tools":["validate_url","add_business_days","hash_text"],"irrelevant_tools":["get_weather"]}
+{"id":"retrieve_github_issue_report_pipeline","input":"Search GitHub issues for runtime bugs and delegate report writing to the remote reporter agent.","expected_tools":["mcp:github:search_issues","a2a:reporter:run"],"irrelevant_tools":["mcp:github:create_issue"],"max_tools_per_namespace":3}
+{"id":"retrieve_github_triage_pipeline","input":"Search GitHub issues, list pull requests, and create a GitHub issue for the bug report.","expected_tools":["mcp:github:search_issues","mcp:github:list_pull_requests","mcp:github:create_issue"],"max_tools_per_namespace":3}

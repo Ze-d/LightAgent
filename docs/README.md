@@ -124,6 +124,7 @@ app/
 | [Structure](Structure.md) | 系统架构与核心链路 |
 | [A2A 协议支持](a2a.md) | A2A Server/Client/Task/Streaming/Agent Card 完整说明 |
 | [项目指标](project-metrics.md) | 代码规模、端点、工具、测试指标 |
+| [Runtime Eval](runtime-evals.md) | Agent Runtime 分层评测、指标和运行方式 |
 | [ADR](adr/README.md) | 架构决策记录 |
 
 ---

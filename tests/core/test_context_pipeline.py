@@ -293,8 +293,8 @@ class TestContextPipeline:
     def test_executes_all_processors_in_order(self):
         pipeline = ContextPipeline([
             DeduplicationProcessor(),
-            ImportanceScorer(),
             HierarchicalSummarizer(target_messages=10),
+            ImportanceScorer(),
             DynamicBudgetAllocator(max_input_tokens=8000),
             IntelligentTrimmer(max_input_tokens=8000),
         ])
@@ -307,8 +307,8 @@ class TestContextPipeline:
         assert len(result.stages_executed) == 5
         assert result.stages_executed == [
             "DeduplicationProcessor",
-            "ImportanceScorer",
             "HierarchicalSummarizer",
+            "ImportanceScorer",
             "DynamicBudgetAllocator",
             "IntelligentTrimmer",
         ]
@@ -330,11 +330,11 @@ class TestContextPipeline:
         assert len(result.messages) == 2
         assert "importance_scores" in result.metadata
 
-    def test_dedup_before_scoring_in_full_pipeline(self):
+    def test_summarize_before_scoring_scores_align_with_final_messages(self):
         pipeline = ContextPipeline([
             DeduplicationProcessor(),
-            ImportanceScorer(),
             HierarchicalSummarizer(target_messages=10),
+            ImportanceScorer(),
             IntelligentTrimmer(max_input_tokens=8000),
         ])
         messages: list[ChatMessage] = [
@@ -344,6 +344,48 @@ class TestContextPipeline:
             {"role": "assistant", "content": "answer"},
         ]
         result = pipeline.run(messages)
+        # After dedup: 3 messages. Summarizer doesn't trigger (< target).
+        # Scores align 1:1 with the 3 final messages.
         assert len(result.messages) == 3
         scores: list[ImportanceScore] = result.metadata["importance_scores"]
         assert len(scores) == 3
+
+    def test_fast_path_skips_heavy_stages_when_within_budget(self):
+        pipeline = ContextPipeline(
+            [
+                DeduplicationProcessor(),
+                HierarchicalSummarizer(target_messages=10),
+                ImportanceScorer(),
+                DynamicBudgetAllocator(max_input_tokens=8000),
+                IntelligentTrimmer(max_input_tokens=8000),
+            ],
+            max_input_tokens=5000,  # budget is huge relative to 3 messages
+        )
+        messages: list[ChatMessage] = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        result = pipeline.run(messages)
+        # Only dedup ran; heavy stages skipped via fast path.
+        assert "DeduplicationProcessor" in result.stages_executed
+        assert "_fast_path" in result.stages_executed
+        assert "ImportanceScorer" not in result.stages_executed
+        assert "HierarchicalSummarizer" not in result.stages_executed
+        assert "IntelligentTrimmer" not in result.stages_executed
+        assert result.messages == messages
+
+    def test_fast_path_disabled_when_no_budget_configured(self):
+        pipeline = ContextPipeline(
+            [
+                DeduplicationProcessor(),
+                ImportanceScorer(),
+            ],
+            # No max_input_tokens → fast path disabled.
+        )
+        messages: list[ChatMessage] = [
+            {"role": "user", "content": "hello"},
+        ]
+        result = pipeline.run(messages)
+        assert "_fast_path" not in result.stages_executed
+        assert "ImportanceScorer" in result.stages_executed

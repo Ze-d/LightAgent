@@ -39,15 +39,44 @@ class PipelineResult:
 
 
 class ContextPipeline:
-    """Runs a sequence of ContextProcessors, accumulating metadata."""
+    """Runs a sequence of ContextProcessors, accumulating metadata.
 
-    def __init__(self, processors: list[ContextProcessor] | None = None) -> None:
+    When *max_input_tokens* is set the pipeline performs a cheap pre-check:
+    if total tokens are already within budget only the lightweight
+    processors (dedup) are executed and the heavy stages are skipped.
+    """
+
+    def __init__(
+        self,
+        processors: list[ContextProcessor] | None = None,
+        *,
+        max_input_tokens: int | None = None,
+    ) -> None:
         self._processors = processors or []
+        self._max_input_tokens = max_input_tokens
 
     def run(self, messages: list[ChatMessage]) -> PipelineResult:
         current = deepcopy(messages)
         accumulated_metadata: dict[str, Any] = {}
         stages: list[str] = []
+
+        # Fast path: total tokens are within budget — only run lightweight
+        # processors that are useful regardless of context pressure.
+        if self._should_fast_path(current):
+            for processor in self._processors:
+                name = type(processor).__name__
+                if name == "DeduplicationProcessor":
+                    result = processor.process(current, accumulated_metadata)
+                    current = result.messages
+                    accumulated_metadata.update(result.metadata)
+                    stages.append(name)
+                # Everything else is skipped — no trimming needed.
+            stages.append("_fast_path")
+            return PipelineResult(
+                messages=current,
+                metadata=accumulated_metadata,
+                stages_executed=stages,
+            )
 
         for processor in self._processors:
             result = processor.process(current, accumulated_metadata)
@@ -60,6 +89,14 @@ class ContextPipeline:
             metadata=accumulated_metadata,
             stages_executed=stages,
         )
+
+    def _should_fast_path(self, messages: list[ChatMessage]) -> bool:
+        if not self._max_input_tokens or self._max_input_tokens <= 0:
+            return False
+        from app.core.token_budget import EstimatedTokenCounter
+
+        counter = EstimatedTokenCounter()
+        return counter.count_messages(messages) <= self._max_input_tokens
 
     @property
     def processor_count(self) -> int:

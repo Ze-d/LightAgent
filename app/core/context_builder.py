@@ -124,7 +124,8 @@ class ContextBuilder:
                     summary_turns_per_group=summary_turns_per_group,
                     dynamic_budget_enabled=dynamic_budget_enabled,
                     llm_client=llm_client,
-                )
+                ),
+                max_input_tokens=self.max_input_tokens,
             )
         else:
             self.pipeline = None
@@ -147,6 +148,17 @@ class ContextBuilder:
         if dedup_enabled:
             processors.append(DeduplicationProcessor())
 
+        # Summarize BEFORE scoring so scores always align with the
+        # current message list — summaries shrink the list, and the
+        # newly inserted summary messages need their own scores too.
+        processors.append(
+            HierarchicalSummarizer(
+                max_level=summary_max_level,
+                turns_per_group=summary_turns_per_group,
+                llm_client=llm_client,
+            )
+        )
+
         processors.append(
             ImportanceScorer(
                 score_system_prompt=scores.get("system_prompt", 100),
@@ -160,14 +172,6 @@ class ContextBuilder:
                 decay_per_turn=decay_per_turn,
                 decay_per_tool=decay_per_tool,
                 memory_prefix=self.memory_prefix,
-            )
-        )
-
-        processors.append(
-            HierarchicalSummarizer(
-                max_level=summary_max_level,
-                turns_per_group=summary_turns_per_group,
-                llm_client=llm_client,
             )
         )
 
